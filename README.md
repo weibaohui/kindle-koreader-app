@@ -5,6 +5,10 @@
 
 专为 Amazon Kindle 墨水屏生态量身打造的精选应用与扩展插件仓库。解决传统应用在电子墨水屏（E-ink）上“刷新闪烁拖影”、“触控按键过小不易按”、“屏幕利用率低”等痛点，提供极致舒适从容的墨水屏人机交互体验。
 
+> **真机验证状态**：全部四个模块均已在实机（Kindle Basic 第 7 代 / KT2，600×800、16 级灰度、无前光）跑通。
+> 数独的**选中 / 填数 / 笔记 / 撤销 / 提示 / 长按清空**六项交互均有逐帧截图证据，
+> 见 [`docs/SUDOKU.md`](docs/SUDOKU.md) 第 5 节。
+
 ---
 
 ## 🌟 包含模块一览
@@ -88,8 +92,15 @@
 - **完整交互**：点格选中 → 点数字填入（再点同数字 = 擦除）/ **长按格子清空** / 笔记模式（候选数增删）/ 撤销 / 提示（自动填一格并计数）。
 - **进度持久化**：断电、退出插件都不丢局，重开自动续上；完成局自动记录**各难度最佳用时**。
 - **刷新策略**：只有真的变了才刷 —— 选格只刷那一格 + 键盘，计时器每秒只刷状态条的时间格。
+- **真机验证**：六项交互全部实机跑通，有逐帧截图证据。
 
 ![数独实机效果图](docs/screenshots/sudoku_preview.png)
+
+长按清空的前后对比（左：第 1 行第 4 格是玩家填的 `4`；右：该格已清空并成为选中格，键盘里的 `4` 恢复可用）：
+
+| 长按前 | 长按后 |
+| :---: | :---: |
+| ![长按前](docs/screenshots/sudoku_hold_before.png) | ![长按后](docs/screenshots/sudoku_hold_after.png) |
 
 ---
 
@@ -139,7 +150,7 @@ kindle-koreader-app/
 ├── docs/
 │   ├── BREAKOUT_PLAN.md        # 打砖块游戏设计方案（调研 + 设计 + 实施路线）
 │   ├── TETRIS_ACCEL.md         # 方块战争「长按加速下滑」设计与真机验证（含两个 KOReader 引擎级坑的复盘）
-│   ├── SUDOKU.md               # 数独设计方案（出题算法 / 形状化视觉 / 真机验证 / 触控注入坑）
+│   ├── SUDOKU.md               # 数独设计方案（出题算法 / 形状化视觉 / 真机验证 / 触控注入坑 / 设备"假掉线"排查）
 │   └── screenshots/           # 实机运行效果截图
 ├── plugins/
 │   ├── tetris.koplugin/       # 俄罗斯方块 KOReader 插件
@@ -180,7 +191,7 @@ kindle-koreader-app/
 │   ├── sim_headless.lua        # 打砖块无头逻辑测试台（mock 掉 KOReader 依赖，70 项断言）
 │   ├── sim_sudoku.lua          # 数独无头逻辑测试台（28 项断言：唯一解/交互/脏区/存档）
 │   ├── verify_sudoku_device.sh # 数独真机交互验证（注入手势 + 逐帧截图）
-│   ├── cleanup_device.sh       # 设备现场清理（撤临时插件 + 装触控助手 + 测清理脚本）
+│   ├── cleanup_device.sh       # 设备现场清理（撤临时插件 + 装触控助手 + 测清理脚本，自带重启脚本）
 │   ├── measure_paddle.py      # 逐像素测量真机挡板位置（验证跟手精度）
 │   ├── measure_botbar.py      # 底栏稳定性连拍测量（逐像素比对，验证"静止不闪"）
 │   └── deploy_breakout.sh     # 一键部署打砖块插件到真机
@@ -191,6 +202,51 @@ kindle-koreader-app/
 > 真机上点不动 —— 别把它当成"插件不响应点击"的证据。
 > 可行的替代方案（走 KOReader 自己的 `Input:handleTouchEv` → `GestureDetector` → `UIManager:sendEvent`）
 > 见 skill `kindle-screen-automation` 的 `scripts/kr_tap_helper.koplugin` 与 `scripts/tap.sh`。
+
+---
+
+## ⚠️ 真机排查：设备"假掉线"
+
+如果你在用本仓库的脚本时发现 **SSH 突然连不上**、但 ARP 表里条目还在 —— **大概率不是掉电，也不是越狱掉了**。
+
+**根因**：KOReader 的 `auto_suspend_timeout_seconds = 900`（默认 15 分钟）→ 空闲 15 分钟自动挂起 →
+**WiFi 射频跟着断** → 设备从网络上"消失"。轻点屏幕即恢复（KOReader 自动重启并重新拉起插件）。
+
+迷惑性极强的表现：
+
+- ARP 表里条目还在（甚至 MAC 完整），但 2222 端口无响应；
+- **全网段扫 2222 一个开着的都没有**；
+- `nmap -sn -P` 直接报 "Host seems down"（连 ARP 都不回应）；
+- Kindle **不响应 ping**（ICMP 全丢），所以别用 ping 判断设备死活。
+
+**判据**：
+
+| 现象 | 结论 |
+| :--- | :--- |
+| ARP 条目还在 + 2222 无响应 + **轻点屏幕后秒回** | KOReader 挂起（最常见） |
+| ARP 条目还在 + 2222 无响应 + **轻点屏幕也不回** | 真掉电 / WiFi 没连上 |
+| 全网段没有任何 2222 | 设备根本没在这个网段 |
+
+**根治**（在运行中的 KOReader 里改并立即落盘，否则重启会被覆盖）：
+
+```lua
+G_reader_settings:saveSetting("auto_suspend_timeout_seconds", 3600)
+G_reader_settings:saveSetting("auto_standby_timeout_seconds", -1)
+G_reader_settings:flush()
+```
+
+> ⚠️ KOReader **v2026.07.2** 的设置模块叫 **`luasettings`**（老版本叫 `settings`），
+> 全局对象是 `G_reader_settings`，落盘接口是 `LuaSettings:flush()`。
+> 该固件**没有** `com.lab126.powerd` 的 `idleScreenTimeout` 属性
+> （`lipc-set-prop` 报 `0x8 lipcErrNoSuchProperty`），屏幕超时归 KOReader 管。
+
+### 其它两条真机硬约束
+
+- **设备 `/tmp` 不持久**：设备一重启，`/tmp/restart_kr.sh` 之类就没了。
+  重启脚本要**现写一份**（`tools/verify_sudoku_device.sh` 与 `tools/cleanup_device.sh` 都已内置）。
+- **重启 KOReader 必须用前台模式** `./koreader.sh`（**不带 `--kual`**）。
+  带 `--kual` 会在后台跑，屏幕上根本不显示 KOReader，截图拍到的是 Kindle 原生桌面。
+  冷启动约 50 秒才加载完插件。
 
 ---
 
@@ -314,6 +370,18 @@ ssh -p 2222 root@<Kindle_IP> 'echo "your_api_key_here" > /mnt/us/extensions/glm_
    - **提示**自动填一个正确的数进空格，提示次数会显示在底部提示行。
    - 数字键盘会把**本行/列/宫已经用过**的数字变灰 —— 灰的就是这一格不能填的。
    - 顶栏三按钮：**难度 / 新局 / 退出**；退出后进度自动存盘，下次进来接着玩。
+
+### 数独真机验证与现场清理
+
+```bash
+./tools/verify_sudoku_device.sh   # 真机交互验证：注入手势 + 逐帧截图取证
+./tools/cleanup_device.sh          # 收尾：撤临时启动器、装触控助手、重启确认、实测截图清理
+```
+
+> 验证期间会在设备上装一个**临时启动器插件** `krlauncher.koplugin`（用触发文件驱动注入手势）。
+> 它会在**每次 KOReader 启动时自动弹出数独**，所以**验证完必须跑 `cleanup_device.sh`**。
+> 清理脚本是**可逆**的 —— 把插件挪到 `plugins.disabled/`，不删；撤完重启 KOReader，
+> 验收标准是：**停在文件管理器、不再自动弹数独**。
 
 ### 一键部署打砖块插件
 
