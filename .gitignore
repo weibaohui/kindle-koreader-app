@@ -1,0 +1,13 @@
+# Environment & Secrets
+*.env
+api_key.txt
+glm_config.env
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Cache & Runtime
+*.sdr
+/tmp/
+*.log
