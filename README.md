@@ -179,6 +179,8 @@ kindle-koreader-app/
 │   ├── count_power_bricks.py   # 逐砖清点真机截图里的道具砖/血量砖/钢砖数量与坐标
 │   ├── sim_headless.lua        # 打砖块无头逻辑测试台（mock 掉 KOReader 依赖，70 项断言）
 │   ├── sim_sudoku.lua          # 数独无头逻辑测试台（28 项断言：唯一解/交互/脏区/存档）
+│   ├── verify_sudoku_device.sh # 数独真机交互验证（注入手势 + 逐帧截图）
+│   ├── cleanup_device.sh       # 设备现场清理（撤临时插件 + 装触控助手 + 测清理脚本）
 │   ├── measure_paddle.py      # 逐像素测量真机挡板位置（验证跟手精度）
 │   ├── measure_botbar.py      # 底栏稳定性连拍测量（逐像素比对，验证"静止不闪"）
 │   └── deploy_breakout.sh     # 一键部署打砖块插件到真机
