@@ -4,8 +4,11 @@
 - 棋盘空间最大化拓展 (单元格 35px，视野拓展 77% 以上)
 - 纯净去按键化设计，右侧看板微型化，底部精简为单行操作小提示
 - 点棋盘任意处直接顺时针旋转方块
-- 支持双击直坠到底、下滑直坠、划屏平移、长按暂存
-- 下落速度严格恒定 0.90s，完美匹配墨水屏物理刷新，杜绝重影与拖影
+- 支持双击直坠到底、下滑直坠、划屏平移
+- 长按屏幕 = 加速下滑 (按住期间下落间隔 1.80s -> 0.10s，抬手恢复)；
+  长按右侧"暂存换块"面板仍为暂存换块
+- 加速下落时只刷新"方块所在列带"，避免全屏刷新拖垮加速节奏
+- 下落速度严格恒定，完美匹配墨水屏物理刷新，杜绝重影与拖影
 --]]--
 
 local Device = require("device")
@@ -34,6 +37,16 @@ local STATE_OVER = 2
 
 -- 恒定下落速度：1.80 秒 / 格。慢节奏从容休闲，彻底杜绝重影与动画拖影
 local CONSTANT_DROP_DELAY = 1.80
+
+-- 长按加速下落的间隔：0.10 秒 / 格 (约为常速 1.80s 的 18 倍)
+-- 墨水屏整屏刷新要几百毫秒，所以加速时只刷"方块所在列带"，
+-- 才能真正跑出"按住就往下砸"的手感
+-- 真机实测(Kindle Basic 第 7 代 / KT2)：6 秒长按下落 52 格 = 9.45 格/秒，无残影
+local ACCEL_DROP_DELAY = 0.10
+
+-- 右侧看板宽度 (x: 492 ~ 596)，长按分区用
+local SIDE_X = 492
+local SIDE_W = 104
 
 -- 7 种经典俄罗斯方块定义 (0-indexed x, y)
 local SHAPES = {
@@ -135,6 +148,9 @@ function TetrisDialog:init()
     self.speed_idx = 1
     self.drop_delay = self.speed_options[self.speed_idx]
 
+    -- 长按加速状态：按住屏幕期间下落间隔缩短，抬手恢复
+    self.accel = false
+
     self.timer_action = nil
     self.is_closed = false
     self.last_swipe_clock = 0
@@ -149,7 +165,9 @@ function TetrisDialog:init()
         Tap = { GestureRange:new{ ges = "tap", range = full_range } },
         Swipe = { GestureRange:new{ ges = "swipe", range = full_range } },
         DoubleTap = { GestureRange:new{ ges = "double_tap", range = full_range } },
-        Hold = { GestureRange:new{ ges = "hold", range = full_range } },
+        -- 注意: hold 不在这里声明为全屏 GestureRange，
+        -- 而是在 registerTouchZones 里按区域拆开(见下)，否则长按无法区分"加速"与"暂存"。
+        -- 触摸区比 ges_events 优先匹配(inputcontainer.lua:259)，所以上面三条只是兜底。
     }
 
     self:registerTouchZones({
@@ -172,10 +190,39 @@ function TetrisDialog:init()
             handler = function(ges) return self:onDoubleTap(nil, ges) end,
         },
         {
-            id = "tetris_all_hold",
+            -- 长按左侧主棋盘区 -> 加速下滑
+            id = "tetris_hold_accel_main",
             ges = "hold",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = SIDE_X / 600, ratio_h = 1 },
             handler = function(ges) return self:onHold(nil, ges) end,
+        },
+        {
+            -- 长按右侧"暂存换块"面板上方(下一个预览区) -> 加速下滑
+            id = "tetris_hold_accel_side_top",
+            ges = "hold",
+            screen_zone = { ratio_x = SIDE_X / 600, ratio_y = 0, ratio_w = (600 - SIDE_X) / 600, ratio_h = 136 / 800 },
+            handler = function(ges) return self:onHold(nil, ges) end,
+        },
+        {
+            -- 长按右侧看板其余部分(暂存面板下方) -> 加速下滑
+            id = "tetris_hold_accel_side_bottom",
+            ges = "hold",
+            screen_zone = { ratio_x = SIDE_X / 600, ratio_y = 216 / 800, ratio_w = (600 - SIDE_X) / 600, ratio_h = (800 - 216) / 800 },
+            handler = function(ges) return self:onHold(nil, ges) end,
+        },
+        {
+            -- 长按右侧"暂存换块"面板 -> 暂存换块 (保留原长按功能)
+            id = "tetris_hold_swap",
+            ges = "hold",
+            screen_zone = { ratio_x = SIDE_X / 600, ratio_y = 136 / 800, ratio_w = SIDE_W / 600, ratio_h = 80 / 800 },
+            handler = function(ges) return self:onHoldSwap(nil, ges) end,
+        },
+        {
+            -- 抬起手指 -> 结束加速
+            id = "tetris_hold_release",
+            ges = "hold_release",
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
+            handler = function(ges) return self:onHoldRelease(nil, ges) end,
         },
     })
 
@@ -217,6 +264,7 @@ function TetrisDialog:startNewGame()
     self.can_hold_ = true
     self.state = STATE_RUNNING
     self.next_ = math.random(1, 7)
+    self.accel = false -- 重开时清掉加速状态
     self:spawn()
     self:scheduleNextDrop()
 end
@@ -352,14 +400,41 @@ end
 
 function TetrisDialog:softDrop()
     if self.state ~= STATE_RUNNING then return end
+    local old_py = self.py_
     if self:fits(self.type_, self.rot_, self.px_, self.py_ + 1) then
         self.py_ = self.py_ + 1
         self.score = self.score + 1
-        self:refreshScreen()
+        if self.accel then
+            -- 加速时只刷新方块所在列带：整屏刷新在墨水屏上要几百毫秒，会拖垮节奏
+            self:refreshPieceBand(old_py, self.py_)
+        else
+            self:refreshScreen()
+        end
     else
         self:lockAndClear()
         self:refreshScreen()
     end
+end
+
+-- 只刷新"当前方块所在列带"（加速下落专用）
+-- 覆盖方块移动前后的全部格子，画面与整屏刷新一致，但推送面积小一个数量级
+function TetrisDialog:refreshPieceBand(py_old, py_new)
+    local shape = SHAPES[self.type_][self.rot_]
+    local x1, x2 = nil, nil
+    for i = 1, 4 do
+        local bx = BOARD_X + (self.px_ + shape[i][1]) * CELL_W
+        if not x1 or bx < x1 then x1 = bx end
+        if not x2 or bx + CELL_W > x2 then x2 = bx + CELL_W end
+    end
+    if not x1 then return self:refreshScreen() end
+    local top = math.min(py_old, py_new)
+    local bottom = math.max(py_old, py_new) + 3 -- 方块最高 4 行
+    local y1 = math.max(0, BOARD_Y + top * CELL_H - 2)
+    local y2 = math.min(Screen:getHeight(), BOARD_Y + (bottom + 1) * CELL_H + 2)
+    UIManager:setDirty(self, "ui", Geom:new{
+        x = math.max(0, x1 - 2), y = y1,
+        w = (x2 - x1) + 4, h = y2 - y1,
+    })
 end
 
 function TetrisDialog:hardDrop()
@@ -514,9 +589,15 @@ function TetrisDialog:scheduleNextDrop()
 
     -- 无论手动还是 AI 观战模式，下落速度均严格保持恒定，绝不随关卡变快。
     -- 默认 1.80s 超从容节奏，彻底杜绝重影与动画拖影异形。
-    local delay = self.drop_delay or CONSTANT_DROP_DELAY
+    -- 例外: 玩家按住屏幕时进入"加速下滑"，间隔缩到 ACCEL_DROP_DELAY。
+    local delay = self.accel and ACCEL_DROP_DELAY or (self.drop_delay or CONSTANT_DROP_DELAY)
 
-    self.timer_action = UIManager:scheduleIn(delay, function()
+    -- 重要: UIManager:scheduleIn 没有返回值(设备端 uimanager.lua:335)，
+    -- 所以必须自己保存 action 的函数引用，stopDropTimer() 才能真正 unschedule 掉旧链。
+    -- 否则每 tick 都会多叠一条下落定时器链，下落速度会随着"重开/切换速度/长按"
+    -- 次数增长而越来越快 (实测链数=外部调用次数，下落速率成倍放大)。
+    local drop_timer
+    drop_timer = function()
         if self.is_closed then return end
         if self.state == STATE_RUNNING then
             self:softDrop()
@@ -524,7 +605,9 @@ function TetrisDialog:scheduleNextDrop()
             self:startNewGame()
         end
         self:scheduleNextDrop()
-    end)
+    end
+    self.timer_action = drop_timer
+    UIManager:scheduleIn(delay, drop_timer)
 end
 
 function TetrisDialog:refreshScreen()
@@ -663,7 +746,13 @@ function TetrisDialog:paintTo(bb, x, y)
     -- 速度 (轻触可循环切换 1.8s / 2.4s / 1.4s / 1.0s)
     RenderText:renderUtf8Text(bb, side_x + 36, stat_y + 194, font_mini, "速度", false, false, Blitbuffer.COLOR_GRAY_3)
     local cur_spd_lbl = self.speed_labels and self.speed_labels[self.speed_idx] or (tostring(self.drop_delay or 1.8) .. "s")
-    RenderText:renderUtf8Text(bb, side_x + 18, stat_y + 218, font_num, cur_spd_lbl, false, true, Blitbuffer.COLOR_BLACK)
+    if self.accel then
+        -- 加速中：用黑底反白标出，让玩家一眼看到自己正按着
+        bb:paintRoundedRect(side_x + 8, stat_y + 200, side_w - 16, 28, Blitbuffer.COLOR_BLACK, 4)
+        RenderText:renderUtf8Text(bb, side_x + 18, stat_y + 218, font_num, "加速中", false, true, Blitbuffer.COLOR_WHITE)
+    else
+        RenderText:renderUtf8Text(bb, side_x + 18, stat_y + 218, font_num, cur_spd_lbl, false, true, Blitbuffer.COLOR_BLACK)
+    end
 
     -- AI 自动演示开关按键 (右侧下方)
     local ai_btn_y = stat_y + 244
@@ -695,25 +784,21 @@ function TetrisDialog:paintTo(bb, x, y)
     -- ======================= 4. 底部极简单行微型提示 =======================
     -- Y: 772 ~ 798 (单行精炼小字，彻底释放底部空间)
     bb:paintRect(6, 772, 588, 1, Blitbuffer.COLOR_GRAY_7)
-    RenderText:renderUtf8Text(bb, 20, 790, font_small, "操作: 划屏平移 · 点棋盘/上划旋转 · 下滑/双击直降 · 点暂存换块", false, false, Blitbuffer.COLOR_GRAY_3)
+    RenderText:renderUtf8Text(bb, 20, 790, font_small, "操作: 划屏平移 · 点棋盘/上划旋转 · 下滑/双击直降 · 长按加速 · 点暂存换块", false, false, Blitbuffer.COLOR_GRAY_3)
 end
 
 -- ======================= 手势与触控事件分发 =======================
 
 -- 顶级 onGesture 统一入口 (直接由 UIManager 派发)
+--
+-- 重要: 必须转发给 InputContainer.onGesture，否则 registerTouchZones 注册的
+-- 区域手势永远不会触发 —— 长按加速 / 长按暂存换块 / 抬手恢复常速
+-- 这三件事都依赖触摸区匹配。
+-- 设备端 inputcontainer.lua:259 的顺序是：先遍历 _ordered_touch_zones，
+-- 命中且 handler 返回 true 即短路；全部不中才回落 ges_events。
 function TetrisDialog:onGesture(ev)
-    if not ev then return true end
-    local ges = ev.ges
-    if ges == "tap" then
-        return self:onTap(nil, ev)
-    elseif ges == "swipe" then
-        return self:onSwipe(nil, ev)
-    elseif ges == "hold" then
-        return self:onHold(nil, ev)
-    elseif ges == "double_tap" then
-        return self:onDoubleTap(nil, ev)
-    end
-    return true
+    InputContainer.onGesture(self, ev)
+    return true -- 吞掉全部手势，避免冒泡到书页/文件管理器
 end
 
 function TetrisDialog:onTap(arg, ges)
@@ -888,10 +973,31 @@ function TetrisDialog:onDoubleTap(arg, ges)
     return true
 end
 
--- 长按屏幕: 暂存方块 (HOLD)
+-- 长按屏幕 (棋盘区/右侧非暂存面板): 加速下滑
 function TetrisDialog:onHold(arg, ges)
-    logger.warn("TetrisDialog:onHold -> holdPiece")
+    if self.state ~= STATE_RUNNING then return true end
+    if self.accel then return true end
+    self.accel = true
+    logger.warn("TetrisDialog:onHold -> 加速下滑")
+    self:scheduleNextDrop()  -- 立刻换成加速间隔
+    self:refreshScreen()
+    return true
+end
+
+-- 长按右侧"暂存换块"面板: 暂存方块 (HOLD)
+function TetrisDialog:onHoldSwap(arg, ges)
+    logger.warn("TetrisDialog:onHoldSwap -> holdPiece")
     self:holdPiece()
+    return true
+end
+
+-- 抬起手指: 结束加速，恢复常速
+function TetrisDialog:onHoldRelease(arg, ges)
+    if not self.accel then return true end
+    self.accel = false
+    logger.warn("TetrisDialog:onHoldRelease -> 恢复常速")
+    self:scheduleNextDrop()
+    self:refreshScreen()
     return true
 end
 
