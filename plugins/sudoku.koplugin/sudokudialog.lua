@@ -18,6 +18,7 @@
 local Device = require("device")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
+local GestureRange = require("ui/gesturerange")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
 local Screen = Device.screen
@@ -221,6 +222,16 @@ function SudokuDialog:init()
     self.H = Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.W, h = self.H }
 
+    -- ⚠️ 必须显式注册手势！
+    -- InputContainer:onGesture 只会把事件分发给 registerTouchZones 注册的触摸区
+    -- 和 ges_events 里声明的手势，**不会**自动调用我们重写的 onTap/onHold。
+    -- 只写 onTap = onTap 方法的话，手势永远到不了插件（表现为"点不动"）。
+    local full_range = Geom:new{ x = 0, y = 0, w = self.W, h = self.H }
+    self.ges_events = {
+        Tap = { GestureRange:new{ ges = "tap", range = full_range } },
+        Hold = { GestureRange:new{ ges = "hold", range = full_range } },
+    }
+
     -- 字体缓存（paintTo 每帧调用，避免重复取）
     self.font_title = Font:getFace("tfont", 20)
     self.font_btn = Font:getFace("cfont", 15)
@@ -383,6 +394,7 @@ function SudokuDialog:giveHint()
     self.sel = i
     self.hints = (self.hints or 0) + 1
     self:setCell(i, self.solution[i], 0)
+    self:refreshHint()   -- 提示次数会显示在提示行末尾
 end
 
 --- 重新计算冲突：同一行/列/宫里出现相同数字就互相标记
@@ -459,6 +471,10 @@ function SudokuDialog:toggleNote(d)
     local i = self.sel
     if not i then return end
     if self.given[i] ~= 0 then return end
+    -- 候选数只写在"空格"上：格子里已经有数字时，数字会盖住候选数
+    -- （paintTo 里 val ~= 0 的分支不再画笔记），结果就是"看不见的状态变化"，
+    -- 撤销时还莫名其妙少一步。这种情况下直接忽略，不进历史。
+    if self.val[i] ~= 0 then return end
     local old = self.notes[i] or 0
     local new
     if bitHas(old, d) then
@@ -600,6 +616,11 @@ function SudokuDialog:refreshStatus()
     self:markRect(0, STATUS_Y0 - 2, self.W, STATUS_Y0 + STATUS_H + 2, "status")
 end
 
+--- 只刷底部提示行（选中/模式/提示次数变化时文案会变）
+function SudokuDialog:refreshHint()
+    self:markRect(0, HINT_Y0 - 2, self.W, HINT_Y0 + 24, "hint")
+end
+
 function SudokuDialog:refreshOverlay()
     self:markRect(0, 0, self.W, self.H, "overlay")
 end
@@ -619,6 +640,11 @@ function SudokuDialog:doRefresh()
     if self._dr.status then
         self:pushRect(self._dr.status, 1)
         self._dr.status = nil
+    end
+    -- 底部提示行
+    if self._dr.hint then
+        self:pushRect(self._dr.hint, 1)
+        self._dr.hint = nil
     end
     -- 顶栏（难度名会变）
     if self._dr.top then
@@ -831,7 +857,11 @@ function SudokuDialog:paintTo(bb, x, y)
     if self.won then
         hint = "完成！用时 " .. fmtTime(self.elapsed) .. " · 点「新局」再来一盘"
     elseif self.notes_mode then
-        hint = "笔记模式：点数字加/取消候选 · 再点「笔记」退出"
+        if self.sel and self.val[self.sel] ~= 0 then
+            hint = "笔记模式：该格已有数字，长按格子可清空 · 再点「笔记」退出"
+        else
+            hint = "笔记模式：空格内点数字加/取消候选 · 再点「笔记」退出"
+        end
     elseif not self.sel then
         hint = "先点一个格子，再点下方数字填入"
     else
@@ -866,6 +896,13 @@ function SudokuDialog:paintTo(bb, x, y)
 end
 
 -- ======================= 交互 =======================
+-- 手势入口：转发给 InputContainer（它按 ges_events / touch zones 分发），
+-- 并吞掉所有手势，避免冒泡到下层的文件管理器。
+function SudokuDialog:onGesture(ev)
+    InputContainer.onGesture(self, ev)
+    return true
+end
+
 function SudokuDialog:onTap(arg, ges)
     ges = ges or arg
     if not ges or not ges.pos then return true end
@@ -926,6 +963,7 @@ function SudokuDialog:onTap(arg, ges)
                 elseif b.action == "notes" then
                     self.notes_mode = not self.notes_mode
                     self:markRect(b.x - 2, ACT_Y0 - 2, b.x + b.w + 2, ACT_Y0 + ACT_H + 2, "act")
+                    self:refreshHint()
                 elseif b.action == "undo" then
                     self:undo()
                     self:refreshPad()
@@ -947,6 +985,7 @@ function SudokuDialog:onTap(arg, ges)
             self.sel = idx
             self:markCellDirty(idx)
             self:refreshPad()
+            self:refreshHint()
             self:doRefresh()
         end
         return true

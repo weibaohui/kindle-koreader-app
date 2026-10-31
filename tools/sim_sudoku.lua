@@ -37,6 +37,10 @@ package.loaded["device"] = {
 }
 package.loaded["ui/font"] = { getFace = function() return {} end }
 package.loaded["ui/geometry"] = { new = function(a, b) return b or a end }
+-- GestureRange mock：插件用它声明 tap/hold 手势（见 ges_events）
+package.loaded["ui/gesturerange"] = {
+    new = function(_, o) return o end,
+}
 package.loaded["datastorage"] = { getSettingsDir = function() return SAVE_DIR end }
 package.loaded["ffi/blitbuffer"] = Blitbuffer
 package.loaded["ui/rendertext"] = {

@@ -39,6 +39,20 @@ ssh_k() { ssh -p 2222 -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$IP"
 tap()  { ssh_k "echo 'tap $1 $2' > /tmp/kr_trigger" >/dev/null 2>&1; sleep 2.5; }
 shot() { "$REPO/tools/kindle_screenshot.sh" "$SHOTS/$1.png" >/dev/null 2>&1; log "截图: $SHOTS/$1.png"; }
 
+log "=== 准备设备端重启脚本（/tmp 重启后会丢，这里直接写一份） ==="
+ssh_k "cat > /tmp/restart_kr.sh <<'EOS'
+#!/bin/sh
+# 重启 KOReader（前台模式，不带 --kual，否则只在后台跑、屏幕上不显示）
+pkill -f reader.lua 2>/dev/null
+sleep 6
+: > /tmp/kr_trigger 2>/dev/null
+: > /tmp/kr_tap_cmd 2>/dev/null
+cd /mnt/us/koreader || exit 1
+setsid nohup ./koreader.sh > /tmp/koreader_stdout.log 2>&1 &
+echo relaunched
+EOS
+chmod +x /tmp/restart_kr.sh"
+
 log "=== 部署插件并重启 KOReader ==="
 scp -P 2222 -o StrictHostKeyChecking=no -q "$REPO/plugins/sudoku.koplugin/"*.lua \
     root@"$IP":/mnt/us/koreader/plugins/sudoku.koplugin/ || log "scp 失败（设备不可达？）"

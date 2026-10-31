@@ -111,20 +111,71 @@
 | 顶栏按钮文字 | 真机截图 | ⚠️ 首版被灰底盖住（绘制顺序反了），已修 |
 | 全屏底色 | 真机截图 | ⚠️ 首版没铺满，下层文件管理器透出来，已修 |
 | 存档续局 | 重开插件后看"用时" | ✅ 接着上次累计 |
-| 触控链路 | 走 KOReader 真实手势管线注入 | ✅（见下方说明） |
+| **选中格（粗框 + 键盘变灰）** | 注入 tap | ⚠️ **首版点不动**，见 5.1 |
+| **填数（数字 + 下方短横线）** | 注入 tap | ✅（修了手势注册后） |
+| **笔记模式（按钮按下态）** | 注入 tap | ✅ |
+| **候选数（小号浅灰 3×3 排布）** | 注入 tap | ⚠️ 首版写在有数字的格子里=看不见，已修 |
+| **撤销（候选数消失）** | 注入 tap | ✅ |
+| **提示（自动填正确数 + 提示次数）** | 注入 tap | ✅ |
+| 长按清空 | 注入 hold | ✅（hold 需真实墙钟，见 5.2） |
 
-### ⚠️ 这台机的触控注入坑
+### 5.1 ⚠️ 最容易踩的坑：`onTap` 写了也不会被调用
 
-KT2 的 zforce2 触摸驱动**不接受外部 evdev 注入**：往 `/dev/input/event1` 写 `input_event`
-时 `write()` 成功返回 16 字节，但**事件进不了输入子系统**（另开读端抓不到任何事件），
-所以"写 evdev 式"的点击脚本在真机上**完全无效**，看起来像插件不响应点击。
+`InputContainer:onGesture`（设备端 `frontend/ui/widget/container/inputcontainer.lua:259`）
+**只**把事件分发给两类注册项：
 
-可行做法是把合成事件直接喂给 KOReader 的 `Input:handleTouchEv`，
-由真正的 `GestureDetector` 识别成 tap / hold，再经 `UIManager:sendEvent` 派发给顶层控件 ——
-与真实手指完全同一条链路。该助手已随 skill `kindle-screen-automation` 一起提供
-（`scripts/kr_tap_helper.koplugin` + `scripts/tap.sh`）。
+1. `registerTouchZones` 注册的触摸区；
+2. `self.ges_events` 里用 `GestureRange` 声明的手势。
 
-### 墨水屏截图的通用坑
+它**不会**自动调用你重写的 `onTap` / `onHold`。
+所以只写 `function SudokuDialog:onTap(...)` 而没注册手势，表现就是**插件完全点不动**，
+而且**不报任何错**（事件被静默丢弃，继续冒泡给下层的文件管理器）。
+
+正确写法：
+
+```lua
+local GestureRange = require("ui/gesturerange")
+-- init() 里：
+local full_range = Geom:new{ x = 0, y = 0, w = self.W, h = self.H }
+self.ges_events = {
+    Tap  = { GestureRange:new{ ges = "tap",  range = full_range } },
+    Hold = { GestureRange:new{ ges = "hold", range = full_range } },
+}
+
+-- 再重写 onGesture 转发并吞掉，避免冒泡到文件管理器
+function SudokuDialog:onGesture(ev)
+    InputContainer.onGesture(self, ev)
+    return true
+end
+```
+
+> 键名 `Tap` / `Hold` 会被拼成处理函数名 `onTap` / `onHold`（`Event:new(name)` → `handler = "on"..name`）。
+
+### 5.2 真机注入触控的四个坑（这台机）
+
+1. **evdev 外部注入无效**：往 `/dev/input/event1` 写 `input_event`，`write()` 返回成功，
+   但事件进不了输入子系统（另开读端抓 3 秒 = 0 事件），KOReader 收不到。
+   可行做法是把合成事件直接喂给 `Input:handleTouchEv`，走 KOReader 自己的手势管线。
+2. **事件结构要用 KOReader 运行时那一份**：运行时事件来自 `libs/libkoreader-input`，
+   时间字段是 `{ sec, usec }`；而 `ffi/linux_input_h` 里的 linux 结构是 `{ tv_sec, tv_usec }`。
+   用错会报 `'struct timeval' has no member named 'sec'`。
+   时间字段还要用 **double**（不是 int64）：int64 读出来是 cdata，会在 `time.lua` 的
+   `math.floor(cdata)` 处炸掉。
+3. **hold 靠真实墙钟定时器判定**：`gesturedetector` 用 `input:setTimeout(slot, "hold", ...)`，
+   必须"按下立刻送、抬起延后送"（中间让事件循环真的转起来）。
+   一次性把按下抬起都灌完 → 定时器来不及触发 → 被判成 **tap**。
+4. **LuaJIT 5.1 的 `string.gmatch` 返回迭代函数**，不能 `ipairs(content:gmatch(...))` ——
+   会抛 `bad argument #1 to 'ipairs' (table expected, got function)`，**直接把 KOReader 带崩**。
+
+### 5.3 其它两条
+
+- **重启 KOReader 要用前台模式**：`./koreader.sh`（不带 `--kual`）。
+  带 `--kual` 会在后台跑，屏幕上根本不显示 KOReader，截图拍到的会是 Kindle 原生桌面。
+  设备重启后 `/tmp` 会被清空，重启脚本要重新写一份（`tools/verify_sudoku_device.sh` 里已经内置）。
+- **墨水屏截图是 framebuffer 级的**，物理面板无法回读；
+  截图只能证明"KOReader 画对了"，不能完全证明"面板刷上去了"，肉眼确认仍需用户看机器。
+
+### 5.4 墨水屏截图的通用坑
 
 面板正在局部刷新时截图会抓到**"撕裂帧"**（半新半旧），看着像渲染 bug。
 判据：同一元素在相邻多帧像素完全一致、只有孤零零一帧异常 → 是撕裂帧。
