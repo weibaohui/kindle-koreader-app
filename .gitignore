@@ -11,3 +11,5 @@ Thumbs.db
 *.sdr
 /tmp/
 *.log
+__pycache__/
+*.py[cod]
