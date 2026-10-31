@@ -24,7 +24,6 @@ local Screen = Device.screen
 local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local RenderText = require("ui/rendertext")
-local Time = require("ui/time")
 
 -- ======================= 布局常量 =======================
 local TOPBAR_H = 44
@@ -46,8 +45,6 @@ local ACT_Y0 = 654              -- 操作行：擦除 / 笔记 / 撤销
 local ACT_H = 68
 
 local HINT_Y0 = 732             -- 底部提示行
-
-local MAX_LIVES_CAP = 5
 
 -- 难度：给定数字越多越简单
 local DIFFS = {
