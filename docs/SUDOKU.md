@@ -117,7 +117,16 @@
 | **候选数（小号浅灰 3×3 排布）** | 注入 tap | ⚠️ 首版写在有数字的格子里=看不见，已修 |
 | **撤销（候选数消失）** | 注入 tap | ✅ |
 | **提示（自动填正确数 + 提示次数）** | 注入 tap | ✅ |
-| 长按清空 | 注入 hold | ✅（hold 需真实墙钟，见 5.2） |
+| **长按清空** | 注入 hold | ✅（hold 需真实墙钟，见 5.2）**已复核**：长按第1行第4格的 `4` → 该格清空、空格 29→30、键盘里 `4` 恢复可用，且未误伤相邻格；帧间差异 10593px，变化集中在 (1,4) 与因选中态迁移而变化的 (8,4) |
+
+证据截图：
+
+| 文件 | 内容 |
+| :--- | :--- |
+| `docs/screenshots/sudoku_preview.png` | 数独主界面 |
+| `docs/screenshots/sudoku_hold_before.png` | 长按前：第1行第4格是玩家填的 `4`（带下划线） |
+| `docs/screenshots/sudoku_hold_after.png` | 长按后：该格已清空并成为选中格，键盘 `4` 恢复可用 |
+| `docs/screenshots/koreader_after_cleanup.png` | 清理后重启 KOReader 停在文件管理器（没有自动弹数独） |
 
 ### 5.1 ⚠️ 最容易踩的坑：`onTap` 写了也不会被调用
 
@@ -181,9 +190,87 @@ end
 判据：同一元素在相邻多帧像素完全一致、只有孤零零一帧异常 → 是撕裂帧。
 **别凭单张截图下渲染 bug 的结论**，至少连拍 3 帧。
 
+### 5.5 ⚠️ 设备反复"掉线"的真凶：`auto_suspend_timeout_seconds = 900`
+
+这台机器的表现是"SSH 莫名其妙连不上"：ARP 表里条目还在，但 2222 端口无响应，
+全网段扫 2222 也扫不到任何开着的 —— 看起来像掉线，实际是 **KOReader 空闲 15 分钟后自动挂起**，
+挂起时 WiFi 射频跟着断，设备就从网络上消失了。**不是设备关机，也不是越狱掉了。**
+
+判据（配合 ARP/端口扫描）：
+
+| 现象 | 结论 |
+| :--- | :--- |
+| ARP 条目还在 + 2222 无响应 + 轻点屏幕后秒回 | KOReader 挂起（最常见） |
+| ARP 条目还在 + 2222 无响应 + 轻点屏幕也不回 | 真掉电 / WiFi 没连上 |
+| 全网段没有任何 2222 | 设备根本没在这个网段 |
+
+查设置：
+
+```bash
+ssh -p 2222 root@192.168.0.99 \
+  "grep -E 'auto_suspend|auto_standby' /mnt/us/koreader/settings.reader.lua"
+```
+
+改法（在**运行中的** KOReader 里改并立即落盘，避免重启后被覆盖）：
+
+```lua
+-- 写进 /tmp/kr_eval.lua，再用 eval 通道执行
+G_reader_settings:saveSetting("auto_suspend_timeout_seconds", 3600)
+G_reader_settings:saveSetting("auto_standby_timeout_seconds", -1)
+G_reader_settings:flush()
+```
+
+> KOReader v2026.07.2 的设置模块叫 **`luasettings`**（不是老版本的 `settings`），
+> 全局对象是 `G_reader_settings`，落盘接口是 `LuaSettings:flush()`。
+
+> 顺带一提：这台固件上 **没有** `com.lab126.powerd` 的 `idleScreenTimeout` 属性
+> （`lipc-set-prop` 报 `0x8 lipcErrNoSuchProperty`），屏幕超时归 KOReader 管。
+
 ---
 
-## 6. 无头测试台
+## 6. 设备现场清理（验证完必做）
+
+验证期间装在 `/mnt/us/koreader/plugins/krlauncher.koplugin` 的**临时启动器**，
+会在每次 KOReader 启动时自动弹出数独，用完必须撤掉。
+
+```bash
+./tools/cleanup_device.sh          # 默认 192.168.0.99
+```
+
+它做四件事：
+
+1. 把 `krlauncher.koplugin` **挪到** `plugins.disabled/`（不删，可逆）；
+2. 装上 skill `kindle-screen-automation` 自带的 `kr_tap_helper.koplugin`（不自动弹任何界面）；
+3. 重启 KOReader，确认助手心跳 `/tmp/kr_tap_beat` 在跳；
+4. 实测 skill 的截图清理脚本。
+
+> 脚本自己会写一份 `/tmp/restart_kr.sh`（设备 `/tmp` 不持久，重启过就没了），
+> 所以不依赖上一轮遗留。
+
+**清理后的验收标准**：重启后 KOReader 停在文件管理器、**没有**自动弹数独，
+`ls /mnt/us/koreader/plugins/ | grep krlauncher` 为空。
+
+---
+
+## 7. 截图零残留（skill 实测）
+
+skill `kindle-screen-automation` 的 `cleanup_screenshots.sh` 在真机上实测：
+
+```bash
+~/.agents/skills/kindle-screen-automation/scripts/cleanup_screenshots.sh --ip 192.168.0.99
+```
+
+造 12 个残留（覆盖 `/mnt/us/screenshot_*.png`、`wininfo_screenshot_*.txt`、
+`koreader/screenshot/*.png`、以及 `/tmp` 下各种带后缀的临时图）→ **12/12 清干净，释放 480 KB**。
+
+> ⚠️ **踩过的坑**：第一版清理脚本用**精确文件名**（`/tmp/kindle_shot.png`），
+> 于是 `kindle_shot2.png`、`current_screenshot_1.png` 这类**带后缀的变体全部漏网**。
+> 已改成通配（`/tmp/kindle_shot*.png` / `/tmp/current_screenshot*.png` / `/tmp/kr_*.png`）。
+> 写清理规则时**一律用通配，不要用精确名**。
+
+---
+
+## 8. 无头测试台
 
 ```bash
 lua tools/sim_sudoku.lua

@@ -30,6 +30,19 @@ scp -P 2222 -o StrictHostKeyChecking=no -q \
 ssh_k "ls -l /mnt/us/koreader/plugins/kr_tap_helper.koplugin/"
 
 echo "=== 3) 重启 KOReader 并确认助手心跳 ==="
+# 设备 /tmp 不持久，重启过就没了 —— 这里现写一份，不用依赖上一轮遗留
+ssh_k "cat > /tmp/restart_kr.sh <<'EOS'
+#!/bin/sh
+# 重启 KOReader（前台模式，不带 --kual，否则只在后台跑、屏幕上不显示）
+pkill -f reader.lua 2>/dev/null
+sleep 6
+: > /tmp/kr_trigger 2>/dev/null
+: > /tmp/kr_tap_cmd 2>/dev/null
+cd /mnt/us/koreader || exit 1
+setsid nohup ./koreader.sh > /tmp/koreader_stdout.log 2>&1 &
+echo relaunched
+EOS
+chmod +x /tmp/restart_kr.sh"
 ssh_k "sh /tmp/restart_kr.sh" >/dev/null 2>&1
 sleep 55
 echo "心跳: $(ssh_k 'cat /tmp/kr_tap_beat 2>/dev/null || echo NONE')"
