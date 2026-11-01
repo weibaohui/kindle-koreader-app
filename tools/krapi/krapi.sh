@@ -33,8 +33,10 @@ case "$cmd" in
     ping)    api /ping ;;
     shot)
         out="${1:-/tmp/krapi_shot.png}"
+        # ⚠️ 必须用 ${out} 而不是 $out：后面紧跟中文全角括号时，
+        #    bash 会把多字节字符的首字节当成变量名的一部分 → "out?: unbound variable"
         curl -s -m 20 -H "X-Api-Token: $TOKEN" -o "$out" \
-             -w "已保存 $out（HTTP %{http_code}, %{size_download} 字节）\n" \
+             -w "已保存 ${out}（HTTP %{http_code}, %{size_download} 字节）\n" \
              "http://$IP:$PORT/screenshot.png"
         ;;
     tap)     api "/tap?x=$1&y=$2" ;;

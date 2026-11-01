@@ -1470,7 +1470,7 @@ function BreakoutDialog:paintTo(bb, x, y)
                                   false, false, Blitbuffer.COLOR_BLACK)
     end
     if slot == 0 then
-        local hint = "拖动移板 · 点砖阵发球 · 双击暂停"
+        local hint = "拖动移板 · 点砖阵发球 · 双击发球/暂停"
         if self.caught_ball then hint = "轻触屏幕释放被吸附的球" end
         RenderText:renderUtf8Text(bb, ex, ey + 17, self.font_small, hint, false, false, Blitbuffer.COLOR_GRAY_5)
     end
@@ -1532,7 +1532,7 @@ function BreakoutDialog:onTap(arg, ges)
         return true
     end
 
-    -- 6) 双击判定 (手动实现，60~380ms 内且距离 < 90px) -> 暂停/继续
+    -- 6) 双击判定 (手动实现，60~380ms 内且距离 < 90px)
     --    两次 tap 的 fts 差值与 Time.s() 同量纲，可直接比较
     if self.last_tap_time and self.last_tap_time > 0 then
         local dt = now - self.last_tap_time
@@ -1540,7 +1540,13 @@ function BreakoutDialog:onTap(arg, ges)
             local dist = math.sqrt((x - self.last_tap_x) ^ 2 + (y - self.last_tap_y) ^ 2)
             if dist < 90 then
                 self.last_tap_time = 0
-                self:togglePause()
+                -- 待发球时：双击 = 直接发射弹珠（不用瞄准砖阵下方那块区域）
+                if self.state == STATE_READY then
+                    self:launchBall()
+                    self:refreshAll()
+                else
+                    self:togglePause()
+                end
                 return true
             end
         end
