@@ -223,6 +223,20 @@ local BTN_DEF = {
 -- 玩家手动拖动挡板后，AI 让位多久（秒）再自动接管
 local AI_MANUAL_HOLD = 1.2
 
+-- ======================= AI 辅助参数 =======================
+-- 候选道具窗口：道具还有这么多秒越过接球线，才算"来得及考虑"
+local AI_ITEM_WINDOW = 2.5
+-- 挡板实际最高约 630px/s（10Hz + 0.7 阻尼），这里保守取 500
+local AI_PADDLE_SPEED = 500
+-- 到位余量：挡板是指数收敛的，最后几像素要额外等一会儿
+local AI_REACH_PAD = 0.25
+-- 道具要比球早这么多秒到线，才值得先把挡板挪过去
+local AI_ITEM_GAP = 0.15
+-- 道具和球差不多同时到线（差不超过这么多秒），就停在交集中心一次接住两个
+local AI_SAME_TIME_GAP = 0.35
+-- 为道具绕路后赶回球落点要留的余量
+local AI_DETOUR_GAP = 0.15
+
 
 local BreakoutDialog = InputContainer:extend{
     name = "breakout_dialog",
@@ -1253,6 +1267,147 @@ function BreakoutDialog:extrapolateLanding(b)
     return left + rel
 end
 
+-- 球到接球线的预计时间（秒）。
+-- 球在往上飞 / 下落速度太小时，说明它离接球线还早，返回一个大数。
+function BreakoutDialog:ballEta(b)
+    if not b then return 99 end
+    local rad = b.r or BALL_R
+    if b.vy <= 1 then return 99 end
+    local t = (self.PADDLE_Y - rad - b.y) / b.vy
+    if t < 0 then return 99 end
+    return t
+end
+
+-- 球到接球线的理论最短时间（秒）—— 一个永远成立的下界。
+--
+-- 球必须把"PADDLE_Y - 球底"这段纵距走完，而竖直速度不会超过球速，
+-- 所以 dY / (球速 * 1.4) 就是它最早可能到板的时间。
+-- 球往上飞时这个下界照样成立：它还得先上去、再回来，耗时只会更多。
+-- 1.4 倍余量留给"加速"道具（球速最多被提到 1.35 倍）。
+--
+-- 这就是"球还早、挪一下没事"的判据：不管球怎么弹，它都不可能比这个时间更早到板。
+function BreakoutDialog:ballEtaMin(b)
+    if not b then return 99 end
+    local rad = b.r or BALL_R
+    local speed = math.sqrt(b.vx * b.vx + b.vy * b.vy)
+    if speed < 1 then return 99 end
+    local t = (self.PADDLE_Y - rad - b.y) / (speed * 1.4)
+    if t < 0 then return 0 end
+    return t
+end
+
+-- 道具到接球线的剩余时间（秒）：道具直落、横向不动，所以只看纵向
+function BreakoutDialog:itemEta(it)
+    local remain = self.PADDLE_Y - (it.y + ITEM_SIZE / 2)
+    if remain <= 0 then return 0 end
+    return remain / ITEM_FALL_SPEED
+end
+
+-- 挡板进入"能接住 x 处目标"的区间所需时间（秒）。
+--
+-- 接取判定是"目标落在挡板范围内"（|Δ| <= half），所以进区间就算接住，
+-- 不用精确停在目标正上方 —— 这个差别在道具马上到线时很关键：
+-- 挡板明明已经停在道具正上方，却因为还要预留收敛尾巴而被判成"来不及"，
+-- AI 就会在道具临线前一刻放弃它、转头去接球。
+function BreakoutDialog:reachInto(x, half)
+    local d = math.abs(x - self.paddle_x) - half
+    if d <= 0 then return 0 end
+    return d / AI_PADDLE_SPEED + AI_REACH_PAD
+end
+
+-- 这个道具是增益吗？减益（变短/加速/细球/反转/掉命/隐形/混乱）不值得专门去接，
+-- 尤其"掉命"是直接扣一条命 —— AI 追道具只追增益，减益一律不追。
+function BreakoutDialog:isGoodItem(it)
+    local pu = it and POWERUP_BY_ID[it.id]
+    if not pu then return false end
+    return not pu.bad
+end
+
+-- AI 道具决策：球优先，有余地把下落的道具捎上。
+--
+-- 两种接取区间宽度不一样，这正是"顺路"能成立的前提：
+--   球  : [ballX - half - r, ballX + half + r]   球有半径，边缘也能蹭到 -> 宽 110px
+--   道具: [itemX - half, itemX + half]           道具要整个落在挡板范围内 -> 宽 96px
+-- 球的区间更宽 -> 两区间常相交。
+--
+-- 按"到线时间"排先后（这是关键）：球的到线时刻和道具的到线时刻不一样，
+-- 挡板只能先停一处、再挪一处，不能指望一个位置同时等两个。
+-- 所以分三档：
+--   1) 白捡：球落点本来就在道具的接取区间里 -> 目标一点不动，顺手就接住。
+--   2) 顺路：道具和球差不多同时到线 -> 目标取交集中心，一个位置覆盖两个。
+--            只在落点可靠（球已出砖阵区）时用：落点不可靠时它会漂，
+--            折中点跟着漂，挡板就变成两头追不到。
+--   3) 绕路：道具明显先到线 -> 先停在道具正上方（稳定目标，不会跑掉），
+--            接完再赶回球落点。赶不赶得回来用"球到板线的最早可能时间"兜底，
+--            所以球不会因为绕路而漏掉。
+--
+-- 球永远优先：任何一档不成立、或者时间不够，就老老实实回去接球。
+function BreakoutDialog:aiItemTarget(ballX, ball)
+    local half = self.paddle_w / 2
+    local rad = ball and (ball.r or BALL_R) or BALL_R
+    local bLo = ballX - half - rad
+    local bHi = ballX + half + rad
+
+    -- 球到接球线的时间估计：
+    --  · 球已经掉出砖阵区 -> 精确值（这时的落点可靠）
+    --  · 球还在高处     -> 用"理论最短时间"下界（球必须走完那段纵距）
+    local reliable = ball and ball.vy > 1 and ball.y > self.GRID_Y + self.GRID_H + rad
+    local tBall = reliable and self:ballEta(ball) or self:ballEtaMin(ball)
+
+    -- 第一轮：白捡 / 顺路
+    local bestX, bestEta = nil, nil
+    for _, it in ipairs(self.items) do
+        if not it.checked then
+            local eta = self:itemEta(it)
+            if eta > 0 and eta <= AI_ITEM_WINDOW then
+                local iLo = it.x - half
+                local iHi = it.x + half
+                -- 1) 白捡：球落点本来就能接住这个道具，目标不用挪
+                if ballX >= iLo and ballX <= iHi and self:reachInto(it.x, half) <= eta then
+                    return ballX
+                end
+                -- 2) 顺路：两个区间相交 + 两者差不多同时到线 -> 停在交集中心
+                local lo = math.max(bLo, iLo)
+                local hi = math.min(bHi, iHi)
+                if reliable and self:isGoodItem(it) and lo <= hi and eta <= tBall
+                    and tBall - eta <= AI_SAME_TIME_GAP then
+                    local mid = (lo + hi) / 2
+                    if self:reachInto(mid, half) <= eta then
+                        if not bestX or eta < bestEta then
+                            bestX = mid
+                            bestEta = eta
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if bestX then return bestX end
+
+    -- 第二轮：绕路（道具明显先到线）
+    --
+    -- 只在"落点可靠"（球已掉出砖阵区）时才允许：这时球的到线时刻和落点都是精确的，
+    -- 接完道具再赶回来的时间算得准。球还在砖阵区时落点只是漂移的快照预测，
+    -- 挡板会先追标点再追真落点，返程比预估长 —— 宁可少接道具，也不能丢球。
+    for _, it in ipairs(self.items) do
+        if not it.checked and reliable and self:isGoodItem(it) then
+            local eta = self:itemEta(it)
+            if eta > 0 and eta <= AI_ITEM_WINDOW and eta <= tBall - AI_ITEM_GAP then
+                -- 来得及挪过去吗
+                if self:reachInto(it.x, half) <= eta then
+                    -- 接完道具还能赶回球落点吗？
+                    -- 这里球已出砖阵区，落点与到线时刻都是精确的，按实际距离算即可。
+                    local tBack = math.abs(ballX - it.x) / AI_PADDLE_SPEED + AI_REACH_PAD
+                    if tBall >= eta + tBack + AI_DETOUR_GAP then
+                        return it.x
+                    end
+                end
+            end
+        end
+    end
+    return ballX
+end
+
 -- AI 目标：挡板该去的横坐标（没有目标时返回 nil）
 --
 -- 落点来源分两种：
@@ -1289,6 +1444,10 @@ function BreakoutDialog:aiTarget()
         -- 至少保证挡板在球的正下方，不会完全漏接。
         target = best.x
     end
+
+    -- 球优先；有余地就顺路捎上正在下落的道具
+    target = self:aiItemTarget(target, best)
+
     return self:clampPaddle(target)
 end
 

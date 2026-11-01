@@ -1479,6 +1479,175 @@ check("AI 开启仍可正常发球", g5.state == 1, "state=" .. tostring(g5.stat
 
 end
 
+-- ======================= 场景 20: AI 顺路接道具 =======================
+-- AI 的落点策略：球优先，有余地就捎上正在下落的道具。
+--
+-- 两种接取区间宽度不同，这是"顺路"能成立的前提：
+--   球  : |ballX - paddle_x| <= half + r  （球有半径，边缘能蹭到）-> 宽 110px
+--   道具: |itemX - paddle_x| <= half        （道具要整个落在挡板上）-> 宽  96px
+-- 球的区间更宽 -> 两区间常相交。
+--
+-- 三档，按"到线时刻"排先后（两个到线时刻不一样，挡板只能先停一处、再挪一处）：
+--   1) 白捡：球落点本来就在道具的接取区间里 -> 目标一点不动，顺手就接住。
+--   2) 顺路：道具和球差不多同时到线 -> 目标取交集中心，一个位置覆盖两个。
+--   3) 绕路：道具明显先到线 -> 先停在道具正上方（稳定目标），接完再赶回球落点。
+--
+-- 两条底线：
+--   · 球永远优先 —— 时间不够就老老实实回去接球。
+--   · 减益不追 —— 尤其"掉命"道具直接扣一条命，AI 不去碰减益。
+section("场景 20: AI 顺路接道具")
+do
+
+local RAD = 7 -- BALL_R
+
+-- 20.1 顺路：两区间相交 + 两者差不多同时到线 -> 目标取交集中心
+-- 用例要避开"白捡"：道具区间不能包含球落点 300，否则命中的是白捡档。
+-- 球在 y=400 下落 -> tBall=2.55s；道具 eta 要落在 [2.20, 2.55] -> eta=2.4s（y=528）
+-- 道具在 380 -> 道具区间 [332,428]，球区间 [245,355]，交集 [332,355] -> 中心 343.5
+local g1 = BreakoutDialog:new()
+g1.paddle_x = 300
+g1.items = { { id = "extend", x = 380, y = 528, px = 380, py = 528, checked = false } }
+local b1 = { x = 300, y = 400, vx = 0, vy = 100, r = RAD }
+local t1 = g1:aiItemTarget(300, b1)
+check("顺路：目标同时落在球和道具两个接取区间里",
+    t1 >= 245 and t1 <= 355 and t1 >= 332 and t1 <= 428, "target=" .. tostring(t1))
+check("顺路：目标 = 交集中心", math.abs(t1 - 343.5) < 0.01, "target=" .. tostring(t1))
+
+-- 20.2 白捡：球落点本来就在道具区间里 -> 目标不挪（不是交集中心）
+local g2 = BreakoutDialog:new()
+g2.paddle_x = 300
+g2.items = { { id = "extend", x = 270, y = 528, px = 270, py = 528, checked = false } }
+local t2 = g2:aiItemTarget(300, b1)
+-- 道具区间 [222,318] 含 300 -> 白捡，保持 300（交集中心会是 281.5）
+check("白捡：球落点已在道具区间内，目标不挪", math.abs(t2 - 300) < 0.01,
+    "target=" .. tostring(t2))
+
+-- 20.3 球优先：道具马上就要过线、赶不过去 -> 目标仍是球落点
+local g3 = BreakoutDialog:new()
+g3.paddle_x = 300
+g3.items = { { id = "extend", x = 480, y = 645, px = 480, py = 645, checked = false } }
+local b3 = { x = 300, y = 600, vx = 0, vy = 100, r = RAD }
+local t3 = g3:aiItemTarget(300, b3)
+check("球优先：来不及接的道具不改变目标", math.abs(t3 - 300) < 0.01,
+    "target=" .. tostring(t3))
+
+-- 20.4 绕路：接完道具还能赶回来接球 -> 先去接道具
+local g4 = BreakoutDialog:new()
+g4.paddle_x = 300
+g4.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+local b4 = { x = 300, y = 300, vx = 0, vy = 100, r = RAD }
+local t4 = g4:aiItemTarget(300, b4)
+check("绕路：时间确实来得及就先去接道具", math.abs(t4 - 480) < 0.01,
+    "target=" .. tostring(t4))
+
+-- 20.5 球优先：球快到了就不为道具绕路
+local g5 = BreakoutDialog:new()
+g5.paddle_x = 300
+g5.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+local b5 = { x = 300, y = 500, vx = 0, vy = 100, r = RAD }
+local t5 = g5:aiItemTarget(300, b5)
+check("球优先：球快到了就不为道具绕路", math.abs(t5 - 300) < 0.01,
+    "target=" .. tostring(t5))
+
+-- 20.6 减益不追："掉命"道具直接扣一条命，AI 绕过去不接
+local g6 = BreakoutDialog:new()
+g6.paddle_x = 300
+g6.items = { { id = "drop", x = 480, y = 598, px = 480, py = 598, checked = false } }
+local t6 = g6:aiItemTarget(300, b4)
+check("减益道具不追（掉命更不能碰）", math.abs(t6 - 300) < 0.01, "target=" .. tostring(t6))
+
+-- 20.7 球还在砖阵区（落点不可靠）时不绕路
+local g7 = BreakoutDialog:new()
+g7.paddle_x = 300
+g7.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+local b7 = { x = 300, y = 200, vx = 0, vy = 100, r = RAD }
+local t7 = g7:aiItemTarget(300, b7)
+check("落点不可靠时不绕路（宁可接球也不冒险）", math.abs(t7 - 300) < 0.01,
+    "target=" .. tostring(t7))
+
+-- 20.8 已经判定过的道具（越过接球线）不再参与决策
+local g8 = BreakoutDialog:new()
+g8.paddle_x = 300
+g8.items = { { id = "extend", x = 380, y = 528, px = 380, py = 528, checked = true } }
+local t8 = g8:aiItemTarget(300, b1)
+check("已判定的道具不再参与决策", math.abs(t8 - 300) < 0.01, "target=" .. tostring(t8))
+
+-- 20.9 端到端：道具正好在球落点上（白捡）-> 球和道具都接到
+local g9 = BreakoutDialog:new()
+g9.ai_mode = true
+g9.state = 1 -- PLAYING
+g9.balls = { { x = 300, y = 300, px = 300, py = 300, vx = 0, vy = 120, r = RAD } }
+g9.items = { { id = "extend", x = 300, y = 573, px = 300, py = 573, checked = false } }
+for _ = 1, 40 do g9:tick() end
+check("端到端：AI 接住了下落的道具", g9.effects.extend ~= nil,
+    "effects.extend=" .. tostring(g9.effects.extend))
+check("端到端：接道具的同时没漏球", g9.lives == 3 and #g9.balls == 1,
+    "lives=" .. tostring(g9.lives) .. " balls=" .. tostring(#g9.balls))
+
+-- 20.10 端到端：道具在球落点旁边 -> AI 绕路去接，而且球也接住了
+local g10 = BreakoutDialog:new()
+g10.ai_mode = true
+g10.state = 1
+g10.balls = { { x = 320, y = 300, px = 320, py = 300, vx = 0, vy = 120, r = RAD } }
+g10.items = { { id = "extend", x = 220, y = 598, px = 220, py = 598, checked = false } }
+for _ = 1, 45 do g10:tick() end
+check("端到端：绕路接道具也接住了", g10.effects.extend ~= nil,
+    "effects.extend=" .. tostring(g10.effects.extend))
+check("端到端：绕路接道具没有牺牲接球",
+    g10.lives == 3 and #g10.balls == 1 and g10.balls[1].vy < 0,
+    "lives=" .. tostring(g10.lives) .. " balls=" .. tostring(#g10.balls)
+    .. " vy=" .. tostring(g10.balls[1] and g10.balls[1].vy))
+
+-- 20.11 同一条球轨迹的 A/B：唯一变量是"要不要道具逻辑"
+--
+-- 两条关键的方法论：
+--  · 球被挡板弹开的角度取决于挡板位置，改一下挡板就会让整局轨迹分叉，
+--    所以不能用"两次不同的随机对局"来比。必须固定随机种子、只切道具逻辑，
+--    这样两边的球轨迹完全一致，差异只来自道具决策。
+--  · 扣命的判据是"所有球都掉光"（多球模式下掉一颗不算扣命），
+--    "掉命"道具直接扣一条命，也要和真漏球分开算。
+local function runAB(seed, frames, with_item)
+    math.randomseed(seed)
+    local g = BreakoutDialog:new()
+    g.ai_mode = true
+    if not with_item then
+        g.aiItemTarget = function(self, ballX, ball) return ballX end
+    end
+    local pickups, drop_pu, lives_lost = 0, 0, 0
+    local prev_lives = g.lives
+    local orig = g.applyPowerUp
+    g.applyPowerUp = function(self, id)
+        pickups = pickups + 1
+        if id == "drop" then drop_pu = drop_pu + 1 end
+        return orig(self, id)
+    end
+    for _ = 1, frames do
+        if g.state == 0 then g:launchBall() end
+        g:tick()
+        if g.lives < prev_lives then
+            lives_lost = lives_lost + (prev_lives - g.lives)
+            prev_lives = g.lives
+        end
+    end
+    return pickups, lives_lost - drop_pu, drop_pu
+end
+local p_on, l_on, d_on = 0, 0, 0
+local p_off, l_off, d_off = 0, 0, 0
+for s = 1, 8 do
+    local a, b, c = runAB(20261031 + s * 7, 4000, true)
+    p_on = p_on + a; l_on = l_on + b; d_on = d_on + c
+    local a2, b2, c2 = runAB(20261031 + s * 7, 4000, false)
+    p_off = p_off + a2; l_off = l_off + b2; d_off = d_off + c2
+end
+print(string.format("   [诊断] 8 局同轨迹 A/B：接住道具 有=%d 无=%d；真扣命 有=%d 无=%d；掉命道具 有=%d 无=%d",
+    p_on, p_off, l_on, l_off, d_on, d_off))
+check("道具增强：同一批对局里接到的道具明显更多", p_on > p_off * 1.2,
+    "有=" .. tostring(p_on) .. " 无=" .. tostring(p_off))
+check("道具增强：没有因为追道具而多扣命", l_on <= l_off,
+    "有=" .. tostring(l_on) .. " 无=" .. tostring(l_off))
+
+end
+
 -- ======================= 结果 =======================
 print(string.format("\n========== 结果: %d 通过, %d 失败 ==========", pass, fail))
 os.exit(fail == 0 and 0 or 1)
