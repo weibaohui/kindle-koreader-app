@@ -118,48 +118,97 @@ local STATE_GAMEOVER = 4
 
 local BRICK_SCORE = { [1] = 10, [2] = 20, [3] = 30 }
 
--- 手工关卡：每行 10 字符
---   '.' = 空   '1' = 普通(1血)   '2' = 强化(2血)   '3' = 精英(3血)
---   '#' = 钢砖(不可破)   '*' = 道具砖(1血，击碎后掉落随机道具)
-local LEVEL_PATTERNS = {
-    { -- 第 1 关：经典（6 块道具砖教学）
-        "1111111111",
-        "1*111*1111",
-        "1111111111",
-        "11*111*111",
-        "11*1111*11",
-    },
-    { -- 第 2 关：混入强化砖（6 块道具砖）
-        "1*1111111*",
-        "2222222222",
-        "1*1121*111",
-        "1111211111",
-        "2222222222",
-        "11*1111*11",
-    },
-    { -- 第 3 关：两侧钢砖墙（6 块道具砖）
-        "1*1111111*",
-        "1#222222#1",
-        "1#111111#1",
-        "2222222222",
-        "#11*111*1#",
-        "11*1111*11",
-    },
-    { -- 第 4 关：金字塔（6 块道具砖）
-        "    11    ",
-        "   2222   ",
-        "  3*33*3  ",
-        " 22222222 ",
-        "2*222222*2",
-        "11*1111*11",
-    },
+-- ======================= 关卡形状库 =======================
+-- 砖阵不再是固定的好几排长方形，而是从形状库里随机挑一个形状铺出来：
+-- 圆形 / 菱形 / 心形 / 三角形 / 十字 / 箭头 / 笑脸 / 沙漏 / 若干字母。
+-- 掩码按 10 列 x 6 行写：'#' = 该位置有砖，'.' = 空。
+-- 每开一局重新随机，每关换一个形状，所以同一个形状不会连着出。
+local SHAPE_LIBRARY = {
+    { id = "circle", name = "圆形", mask = {
+        "..######..", ".########.", "##########",
+        "##########", ".########.", "..######..",
+    } },
+    { id = "diamond", name = "菱形", mask = {
+        "...####...", "..######..", ".########.",
+        ".########.", "..######..", "...####...",
+    } },
+    { id = "heart", name = "心形", mask = {
+        ".##....##.", "####..####", "##########",
+        ".########.", "..######..", "...####...",
+    } },
+    { id = "triangle", name = "三角形", mask = {
+        "..........", "....##....", "...####...",
+        "..######..", ".########.", "##########",
+    } },
+    { id = "cross", name = "十字", mask = {
+        "....##....", "....##....", "##########",
+        "##########", "....##....", "....##....",
+    } },
+    { id = "arrow", name = "箭头", mask = {
+        "....##....", "....##....", "##########",
+        ".########.", "..######..", "...####...",
+    } },
+    { id = "smiley", name = "笑脸", mask = {
+        "..######..", ".########.", "##..##..##",
+        "##..##..##", ".########.", "..######..",
+    } },
+    { id = "hourglass", name = "沙漏", mask = {
+        "##########", "##########", "..######..",
+        "...####...", "..######..", "##########",
+    } },
+    { id = "letter_a", name = "字母A", mask = {
+        "...####...", "..######..", ".########.",
+        "##########", "..##..##..", "..##..##..",
+    } },
+    { id = "letter_h", name = "字母H", mask = {
+        "##......##", "##......##", "##########",
+        "##########", "##......##", "##......##",
+    } },
+    { id = "letter_t", name = "字母T", mask = {
+        "##########", "...####...", "...####...",
+        "...####...", "...####...", "...####...",
+    } },
+    { id = "letter_u", name = "字母U", mask = {
+        ".########.", ".##....##.", ".##....##.",
+        ".##....##.", ".##....##.", "..######..",
+    } },
+    { id = "letter_x", name = "字母X", mask = {
+        "###....###", ".###..###.", "..######..",
+        "..######..", ".###..###.", "###....###",
+    } },
+    { id = "letter_e", name = "字母E", mask = {
+        "##########", "##........", "##........",
+        "######....", "##........", "##########",
+    } },
+    { id = "letter_b", name = "字母B", mask = {
+        ".########.", ".##....##.", ".##....##.",
+        ".########.", ".##....##.", ".########.",
+    } },
+    { id = "letter_c", name = "字母C", mask = {
+        "..######..", ".########.", "##........",
+        "##........", ".########.", "..######..",
+    } },
+    { id = "letter_o", name = "字母O", mask = {
+        "..######..", ".########.", "##......##",
+        "##......##", ".########.", "..######..",
+    } },
+    { id = "letter_s", name = "字母S", mask = {
+        "..######..", ".##.......", "..######..",
+        ".......##.", ".##....##.", "..######..",
+    } },
+    { id = "letter_v", name = "字母V", mask = {
+        "##......##", "##......##", "##......##",
+        ".##....##.", ".##....##.", "..######..",
+    } },
+    { id = "letter_y", name = "字母Y", mask = {
+        "##......##", "##......##", ".##....##.",
+        "..######..", "...####...", "...####...",
+    } },
 }
 
--- 程序化关卡（第 5 关起）的道具砖数量：随关卡递增，封顶 10 块
+-- 道具砖数量：每关 6 块起步，关卡越高越多，封顶 10 块
 local POWER_BRICK_MIN = 6
 local POWER_BRICK_MAX = 10
-
-local SHAPE_TEMPLATES = { "full", "checker", "gaps", "fortress", "triangle" }
 
 -- 顶栏按钮：靠左排布，避开右上角系统状态栏(时钟/电量)的覆盖区域
 local BTN_DEF = {
@@ -340,47 +389,81 @@ function BreakoutDialog:saveHiscore()
 end
 
 -- ======================= 关卡 =======================
+-- 随机抽一个形状。exclude 用来避开上一个形状 —— 保证相邻两关形状不同，
+-- 否则"每关换个花样"的观感会被 1/20 的概率破坏掉。
+function BreakoutDialog:pickShape(exclude)
+    local s = nil
+    for _ = 1, 24 do
+        s = SHAPE_LIBRARY[math.random(#SHAPE_LIBRARY)]
+        if not exclude or s.id ~= exclude.id then break end
+    end
+    return s
+end
+
+-- 按形状铺一关
+-- 返回每行 10 字符的字符串数组，字符含义：
+--   '.' = 空   '1' = 普通(1血)   '2' = 强化(2血)   '3' = 精英(3血)
+--   '#' = 钢砖(不可破)   '*' = 道具砖(1血，击碎后掉落随机道具)
 function BreakoutDialog:randomLevel(n)
-    local tpl = SHAPE_TEMPLATES[math.random(#SHAPE_TEMPLATES)]
-    local maxhp = math.min(3, 1 + math.floor((n - 4) / 3))
+    -- 本关用哪个形状：优先用预抽好的（过关浮层要提前告诉玩家下一关是什么形状）
+    local shape = self.next_shape or self:pickShape()
+    self.level_shape = shape
+
     local rows = {}
-    -- 第一步：按模板铺底，'1'=普通砖候选 '.'=空位 '#'=钢砖
+    local cells = {}
     for r = 1, ROWS do
+        local line = shape.mask[r] or ""
         local row = {}
         for c = 1, COLS do
-            local ch = "1"
-            if tpl == "checker" then
-                if (r + c) % 2 ~= 0 then ch = "." end
-            elseif tpl == "gaps" then
-                if math.random(1, 100) <= 18 then ch = "." end
-            elseif tpl == "fortress" then
-                if (c == 1 or c == COLS) and r <= 4 then ch = "#" end
-            elseif tpl == "triangle" then
-                local d = math.abs(c - (COLS + 1) / 2)
-                if d + r > 7 then ch = "." end
+            if string.sub(line, c, c) == "#" then
+                row[c] = "1"
+                cells[#cells + 1] = { r = r, c = c }
+            else
+                row[c] = "."
             end
-            row[c] = ch
         end
         rows[r] = table.concat(row)
     end
 
-    -- 第二步：撒道具砖，数量随关卡递增(6 → 10 块封顶)。
-    -- 必须排在血量升级之前 —— 否则高关卡里普通砖都被升级成 2/3 血砖，
-    -- 可放道具砖的位置不够，数量就会少放。重试到放满为止。
-    local want = math.min(POWER_BRICK_MAX, POWER_BRICK_MIN + math.floor((n - 5) / 2))
-    local placed = 0
-    local guard = 0
-    while placed < want and guard < want * 30 do
-        guard = guard + 1
-        local r = math.random(1, ROWS)
-        local c = math.random(1, COLS)
-        if string.sub(rows[r], c, c) == "1" then
-            rows[r] = string.sub(rows[r], 1, c - 1) .. "*" .. string.sub(rows[r], c + 1)
-            placed = placed + 1
-        end
+    -- 把形状占用的格子洗一遍，后面按洗好的顺序"发牌"，
+    -- 免得钢砖/道具砖全挤在形状的某一侧。
+    for i = #cells, 2, -1 do
+        local j = math.random(i)
+        cells[i], cells[j] = cells[j], cells[i]
+    end
+    local idx = 0
+    local function next_cell()
+        idx = idx + 1
+        if idx > #cells then return nil end
+        return cells[idx]
+    end
+    local function put(cell, ch)
+        local line = rows[cell.r]
+        rows[cell.r] = string.sub(line, 1, cell.c - 1) .. ch .. string.sub(line, cell.c + 1)
+    end
+
+    -- 第一步：钢砖。第 4 关起掺几块不可破的砖。
+    -- 钢砖**不计入过关计数**，所以掺多少都不会卡关。
+    local steel = 0
+    if n >= 4 then steel = math.min(math.floor((n - 2) / 2), 6) end
+    for _ = 1, steel do
+        local cell = next_cell()
+        if not cell then break end
+        put(cell, "#")
+    end
+
+    -- 第二步：道具砖，每关 6 块起步，关卡越高越多。
+    -- 放在血量升级之前 —— 否则高关卡里普通砖都被升级成 2/3 血砖，
+    -- 可放道具砖的位置不够，数量就会少放。
+    local want = math.min(POWER_BRICK_MAX, POWER_BRICK_MIN + math.floor((n - 1) / 3))
+    for _ = 1, want do
+        local cell = next_cell()
+        if not cell then break end
+        put(cell, "*")
     end
 
     -- 第三步：剩余普通砖按关卡升级血量（道具砖不参与升级，保持 1 血一击即掉）
+    local maxhp = math.min(3, 1 + math.floor((n - 1) / 4))
     if maxhp > 1 then
         for r = 1, ROWS do
             local row = {}
@@ -394,16 +477,15 @@ function BreakoutDialog:randomLevel(n)
             rows[r] = table.concat(row)
         end
     end
+
+    -- 为下一关预抽形状：过关浮层要提前告诉玩家"下一关是什么形状"，
+    -- 并且避开本关的形状，保证相邻两关不重样。
+    self.next_shape = self:pickShape(shape)
     return rows
 end
 
 function BreakoutDialog:loadLevel(n)
-    local pattern
-    if n <= #LEVEL_PATTERNS then
-        pattern = LEVEL_PATTERNS[n]
-    else
-        pattern = self:randomLevel(n)
-    end
+    local pattern = self:randomLevel(n)
 
     self.bricks_left = 0
     for r = 1, ROWS do
@@ -441,6 +523,8 @@ function BreakoutDialog:startNewGame(full)
     self.paddle_w = PADDLE_W
     self.bullets = {}
     self.laser_timer = 0
+    -- 新的一局要重新抽形状：把预抽的清掉
+    self.next_shape = nil
     self:loadLevel(1)
     self.state = STATE_READY
     self.state_before_pause = nil
@@ -1884,7 +1968,12 @@ function BreakoutDialog:paintTo(bb, x, y)
     elseif self.state == STATE_GAMEOVER then
         self:drawOverlay(bb, cx, 290, 260, 120, "游戏结束", "得分 " .. self.score .. " · 轻触重开")
     elseif self.state == STATE_LEVELCLEAR then
-        self:drawOverlay(bb, cx, 300, 260, 100, "过关！", "进入第 " .. (self.level + 1) .. " 关")
+        -- 提前告诉玩家下一关是什么形状（next_shape 是过关时就抽好的）
+        local sub = "进入第 " .. (self.level + 1) .. " 关"
+        if self.next_shape then
+            sub = sub .. " · " .. self.next_shape.name
+        end
+        self:drawOverlay(bb, cx, 300, 260, 100, "过关！", sub)
     end
 end
 

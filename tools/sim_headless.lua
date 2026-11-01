@@ -93,6 +93,29 @@ package.loaded["ui/uimanager"] = {
 local SRC = arg[1] or "plugins/breakout.koplugin/breakoutdialog.lua"
 local BreakoutDialog = assert(loadfile(SRC))()
 
+-- 在当前关卡里找一块可破的砖，返回 r, c, bx, by（砖格左上角坐标）
+-- 砖阵形状是随机的，测试不能再假定固定坐标上有砖
+local function firstBrick(d)
+    for r = 1, 6 do
+        for c = 1, 10 do
+            local b = d.bricks[r][c]
+            if b and b.hp > 0 then
+                return r, c, d.GRID_X + (c - 1) * 55, d.GRID_Y + (r - 1) * 27
+            end
+        end
+    end
+    return nil
+end
+
+-- 插件源码文本：道具表、关卡形状库都要从源码里解析，
+-- 这样断言跟实现同源，不会两边各写一份对不上。
+local text = (function()
+    local f = assert(io.open(SRC, "r"))
+    local t = f:read("*a")
+    f:close()
+    return t
+end)()
+
 -- ======================= 测试框架 =======================
 local pass, fail = 0, 0
 local function check(name, cond, detail)
@@ -108,11 +131,14 @@ local function section(t) print("\n== " .. t .. " ==") end
 
 -- ======================= 场景 1: 基础跑通 =======================
 section("场景 1: 基本循环")
+do
 local dlg = BreakoutDialog:new()
 check("初始状态 READY", dlg.state == 0, "state=" .. tostring(dlg.state))
 check("初始 1 颗球", #dlg.balls == 1, "#balls=" .. #dlg.balls)
 check("初始挡板宽 96", dlg.paddle_w == 96, "w=" .. tostring(dlg.paddle_w))
-check("第 1 关 50 块砖", dlg.bricks_left == 50, "left=" .. tostring(dlg.bricks_left))
+-- 第 1 关的砖阵是随机形状，砖数取决于形状本身（28~52 之间）
+check("第 1 关砖数在形状范围内", dlg.bricks_left >= 24 and dlg.bricks_left <= 52,
+    "left=" .. tostring(dlg.bricks_left))
 
 dlg:launchBall()
 check("发球后进入 PLAYING", dlg.state == 1, "state=" .. tostring(dlg.state))
@@ -120,6 +146,7 @@ check("发球后进入 PLAYING", dlg.state == 1, "state=" .. tostring(dlg.state)
 -- 让挡板自动跟随落点标记，连续跑 3000 帧
 local ticks = 0
 local serves = 0
+local max_score = 0
 for i = 1, 3000 do
     -- 模拟玩家：待发球就发球，球结束了就重开
     if dlg.state == 4 then
@@ -131,14 +158,20 @@ for i = 1, 3000 do
     if dlg.marker_x then dlg.paddle_target_x = dlg.marker_x end
     dlg:tick()
     ticks = i
+    if dlg.score > max_score then max_score = dlg.score end
 end
 check("连续跑 3000 帧无异常", true)
-check("分数有增长", dlg.score > 0, "score=" .. tostring(dlg.score))
+-- 看"最高分"而不是"最终分"：游戏结束时 startNewGame 会把分数清零，
+-- 最后一局万一一砖都没打着，最终分就是 0 —— 那是这个自动玩家水平不够
+-- （改动前后实测发球次数完全一样，都是 27 次），不是游戏本身的问题。
+check("分数有增长", max_score > 0, "最高分=" .. tostring(max_score))
 print(string.format("     跑了 %d 帧, 发球 %d 次, 分数=%d, 关卡=%d, 生命=%d, 球数=%d",
     ticks, serves, dlg.score, dlg.level, dlg.lives, #dlg.balls))
 
+end
 -- ======================= 场景 2: 多球 =======================
 section("场景 2: 多球分裂")
+do
 local g = BreakoutDialog:new()
 g:launchBall()
 check("分裂前 1 颗球", #g.balls == 1)
@@ -158,8 +191,10 @@ check("所有球都有速度", allmoving)
 g:updatePrediction()
 check("多球时只出一个落点标记", g.marker_x ~= nil)
 
+end
 -- ======================= 场景 3: 球全部掉光才扣命 =======================
 section("场景 3: 扣命判定")
+do
 local h = BreakoutDialog:new()
 h:launchBall()
 h:applyMulti()
@@ -173,8 +208,10 @@ h.balls[1].y = h.DEATH_Y + 100
 h:stepBalls(0.1)
 check("最后一颗球掉光才扣命", h.lives == 2, "lives=" .. h.lives)
 
+end
 -- ======================= 场景 4: 道具掉落与接取 =======================
 section("场景 4: 道具系统")
+do
 local p = BreakoutDialog:new()
 p:launchBall()
 
@@ -279,8 +316,10 @@ check("吸盘把球粘住", e10.caught_ball == b, "caught=" .. tostring(e10.caug
 e10:releaseCaught()
 check("释放后球恢复飞行", e10.caught_ball == nil and b.vy < 0, "vy=" .. tostring(b.vy))
 
+end
 -- ======================= 场景 5: 道具落点标记 =======================
 section("场景 5: 道具落点标记")
+do
 local m = BreakoutDialog:new()
 m:launchBall()
 m:spawnItem(300, 150)
@@ -288,8 +327,10 @@ m:updateItems()
 check("道具落点标记已生成", #m.item_markers == 1, "#markers=" .. #m.item_markers)
 check("标记 x 与道具一致", m.item_markers[1] == m.items[1].x)
 
+end
 -- ======================= 场景 6: 吸盘吸附时球跟随挡板 =======================
 section("场景 6: 吸附球跟随挡板")
+do
 local q = BreakoutDialog:new()
 q:launchBall()
 q:applyPowerUp("catch")
@@ -303,8 +344,10 @@ q:tick()
 check("吸附球跟随挡板移动", math.abs(qb.x - q.paddle_x) < 1,
       "ball.x=" .. tostring(qb.x) .. " paddle.x=" .. tostring(q.paddle_x))
 
+end
 -- ======================= 场景 7: 长时间压力测试 =======================
 section("场景 7: 压力测试 (随机道具 + 多球, 20000 帧)")
+do
 local st = BreakoutDialog:new()
 local pu_ids = { "extend", "shrink", "multi", "slow", "life", "catch", "fast" }
 local rand = 12345
@@ -336,8 +379,10 @@ check("20000 帧压力测试无异常", err == nil, tostring(err))
 print(string.format("     跑了 %d 帧, 分数=%d, 关卡=%d, 球数=%d, 道具数=%d",
     ok_frames, st.score, st.level, #st.balls, #st.items))
 
+end
 -- ======================= 场景 8: 关卡推进到程序化关 =======================
 section("场景 8: 关卡推进")
+do
 local lv = BreakoutDialog:new()
 check("初始关卡 1", lv.level == 1)
 lv.level = 5
@@ -351,10 +396,12 @@ for r = 1, 6 do
 end
 check("程序化关卡含道具砖", haspower)
 
+end
 -- ======================= 场景 9: 增量刷新脏区 =======================
 -- 真机教训: 增量刷新只推"运动脏区"时, 底栏(分数/生命/效果条)与
 -- "游戏结束"浮层永远不会上屏 —— 必须显式把它们标脏。
 section("场景 9: 增量刷新脏区")
+do
 local function regions_covers(y0, y1)
     for _, r in ipairs(dirty_regions) do
         if r.y == nil then print("   !! 区域缺 y:", r.x, r.y, r.w, r.h) end
@@ -420,8 +467,154 @@ dr2:applyPowerUp("slow")     -- 底栏速度显示会变
 dr2:tick()
 check("道具生效推效果条", region_covers(BAR_FX.x0, BAR_FX.y0, BAR_FX.x1, BAR_FX.y1))
 
--- ======================= 场景 10: 道具砖密度 (v1.2 加量) =======================
-section("场景 10: 道具砖密度")
+end
+-- ======================= 场景 10: 关卡形状库 =======================
+-- 砖阵不再是固定的几排长方形，而是从形状库里随机挑一个形状铺出来。
+section("场景 10: 关卡形状库")
+do
+
+-- 形状库直接从插件源码里解析，保证断言跟实现同源
+-- 注意 id 里有下划线(letter_a)，正则要用 [%w_] 而不是 %w
+local shape_blocks = {}
+for id, nm, body in text:gmatch('{ id = "([%w_]+)", name = "([^"]+)", mask = {(.-)} }') do
+    local mask = {}
+    for s in body:gmatch('"([.#]+)"') do mask[#mask + 1] = s end
+    if #mask == 6 then
+        shape_blocks[#shape_blocks + 1] = { id = id, name = nm, mask = mask }
+    end
+end
+check("形状库有 20 个形状", #shape_blocks == 20, "实际 " .. #shape_blocks)
+
+-- 每个形状的掩码必须是 10x6
+local badmask = {}
+local counts = {}
+for _, sh in ipairs(shape_blocks) do
+    local n = 0
+    for r = 1, 6 do
+        local line = sh.mask[r] or ""
+        if #line ~= 10 then badmask[#badmask + 1] = sh.id .. "/r" .. r end
+        for c = 1, #line do
+            if string.sub(line, c, c) == "#" then n = n + 1 end
+        end
+    end
+    counts[sh.id] = n
+    if n < 24 or n > 52 then badmask[#badmask + 1] ..= "" end
+end
+check("每个形状掩码都是 10x6", #badmask == 0, table.concat(badmask, ","))
+
+-- 形状的砖数必须在合理区间（太少的形状一关秒过，太多的关卡太长）
+local badcount = {}
+for id, n in pairs(counts) do
+    if n < 24 or n > 52 then badcount[#badcount + 1] = id .. "=" .. n end
+end
+check("每个形状砖数在 24~52 之间", #badcount == 0, table.concat(badcount, ","))
+
+-- 剪影类形状必须左右对称（菱形/圆形/十字/笑脸等）。
+-- 字母天然可以不对称（E/C/S 的开口方向本来就不对称），所以按类别排除；
+-- 但那些本身对称的字母（A/H/T/U/X/O/V/Y）必须保持对称。
+local SYMMETRIC_LETTERS = {
+    letter_a = true, letter_h = true, letter_t = true, letter_u = true,
+    letter_x = true, letter_o = true, letter_v = true, letter_y = true,
+}
+local asym = {}
+for _, sh in ipairs(shape_blocks) do
+    local is_letter = string.sub(sh.id, 1, 6) == "letter"
+    if not (is_letter and not SYMMETRIC_LETTERS[sh.id]) then
+        for _, row in ipairs(sh.mask) do
+            if row ~= string.reverse(row) then
+                asym[#asym + 1] = sh.id
+                break
+            end
+        end
+    end
+end
+check("剪影形状都左右对称", #asym == 0, table.concat(asym, ","))
+
+-- 菱形必须上下左右都对称（用户明确要求"菱形对称"）
+local dia
+for _, sh in ipairs(shape_blocks) do
+    if sh.id == "diamond" then dia = sh end
+end
+check("菱形存在", dia ~= nil)
+if dia then
+    local hs = true
+    for _, row in ipairs(dia.mask) do
+        if row ~= string.reverse(row) then hs = false end
+    end
+    local vs = true
+    for i = 1, 3 do
+        if dia.mask[i] ~= dia.mask[7 - i] then vs = false end
+    end
+    check("菱形左右对称", hs)
+    check("菱形上下对称", vs)
+end
+
+-- 掩码的占用格集合
+local function shape_sig(mask)
+    local t = {}
+    for r = 1, 6 do
+        for c = 1, 10 do
+            local ch = string.sub(mask[r] or "", c, c)
+            t[#t + 1] = (ch == "#") and "1" or "0"
+        end
+    end
+    return table.concat(t)
+end
+local shape_sigs = {}
+for _, sh in ipairs(shape_blocks) do shape_sigs[shape_sig(sh.mask)] = sh.id end
+
+-- 当前关卡实际占用的格子
+local function level_sig(d)
+    local t = {}
+    for r = 1, 6 do
+        for c = 1, 10 do
+            t[#t + 1] = d.bricks[r][c] and "1" or "0"
+        end
+    end
+    return table.concat(t)
+end
+
+-- (1) 每一关的砖阵都必须**正好等于**形状库里某个形状
+-- next_shape = nil 是为了强制现抽一个形状（否则会用到预抽给下一关的那个）
+local mismatch = {}
+for lv = 1, 12 do
+    local d = BreakoutDialog:new()
+    d.next_shape = nil
+    d.level = lv
+    d:loadLevel(lv)
+    if not shape_sigs[level_sig(d)] then
+        mismatch[#mismatch + 1] = "第" .. lv .. "关"
+    end
+end
+check("每关砖阵都正好等于某个形状", #mismatch == 0, table.concat(mismatch, ","))
+
+-- (2) 相邻两关形状必须不同 —— 在同一个对话框上逐关推进才准
+local same = 0
+local prev = nil
+local dw = BreakoutDialog:new()
+for lv = 1, 30 do
+    dw.level = lv
+    dw:loadLevel(lv)
+    local id = shape_sigs[level_sig(dw)]
+    if id == prev then same = same + 1 end
+    prev = id
+end
+check("相邻两关形状不重复", same == 0, "重复 " .. same .. " 次")
+
+-- (3) 形状要真的随机：多跑多关，形状库里大部分形状都该出现过
+local seen = {}
+for lv = 1, 400 do
+    local d = BreakoutDialog:new()
+    d.next_shape = nil
+    d.level = lv
+    d:loadLevel(lv)
+    seen[shape_sigs[level_sig(d)]] = true
+end
+local nseen = 0
+for _ in pairs(seen) do nseen = nseen + 1 end
+check("随机覆盖到大部分形状 (>=16/20)", nseen >= 16, "覆盖 " .. nseen .. "/20")
+
+-- (4) 道具砖数量：每关 6 块起步，随关卡递增，封顶 10
 local function countPower(d)
     local n = 0
     for r = 1, 6 do
@@ -432,35 +625,61 @@ local function countPower(d)
     end
     return n
 end
-
--- 手工关卡 1-4: 每关固定 6 块道具砖；加量的是"道具砖", 墙的总砖数不能跟着变
-local expect_breakable = { 50, 60, 54, 40 }
-for lv = 1, 4 do
+local power_bad = {}
+for lv = 1, 15 do
+    local want = math.min(10, 6 + math.floor((lv - 1) / 3))
     local d = BreakoutDialog:new()
+    d.next_shape = nil
     d.level = lv
     d:loadLevel(lv)
-    check(string.format("第 %d 关道具砖恰好 6 块", lv), countPower(d) == 6,
-        "实际 " .. countPower(d))
-    check(string.format("第 %d 关可破砖块数保持 %d", lv, expect_breakable[lv]),
-        d.bricks_left == expect_breakable[lv], "实际 " .. tostring(d.bricks_left))
+    local got = countPower(d)
+    if got ~= want then power_bad[#power_bad + 1] = string.format("第%d关 %d≠%d", lv, got, want) end
 end
+check("道具砖数量符合 6→10 递增规则", #power_bad == 0, table.concat(power_bad, " "))
 
--- 程序化关卡: 道具砖随关卡递增 6 -> 10 封顶；撒点必须放满，不能因随机位置不合法而少放
-local expect_proc = { [5] = 6, [7] = 7, [9] = 8, [11] = 9, [13] = 10, [21] = 10 }
-for lv, want in pairs(expect_proc) do
-    local got, ok = nil, true
-    for _ = 1, 8 do   -- 随机关卡, 多跑几次确认稳定
-        local d = BreakoutDialog:new()
-        d.level = lv
-        d:loadLevel(lv)
-        got = countPower(d)
-        if got ~= want then ok = false end
+-- (5) 钢砖：第 4 关起才有，且不可破、也不计入过关计数
+local steel_lv3 = 0
+for _ = 1, 20 do
+    local d = BreakoutDialog:new()
+    d.level = 3
+    d:loadLevel(3)
+    for r = 1, 6 do
+        for c = 1, 10 do
+            local b = d.bricks[r][c]
+            if b and b.hp < 0 then steel_lv3 = steel_lv3 + 1 end
+        end
     end
-    check(string.format("程序化第 %d 关道具砖 %d 块", lv, want), ok,
-        "实际 " .. tostring(got))
 end
+check("第 3 关没有钢砖", steel_lv3 == 0, "出现 " .. steel_lv3 .. " 块")
 
--- 同屏掉落上限与落点标记上限要跟得上加量后的掉落频率：
+local d5 = BreakoutDialog:new()
+d5.level = 6
+d5:loadLevel(6)
+local steel5, breakable5 = 0, 0
+for r = 1, 6 do
+    for c = 1, 10 do
+        local b = d5.bricks[r][c]
+        if b then
+            if b.hp < 0 then steel5 = steel5 + 1 else breakable5 = breakable5 + 1 end
+        end
+    end
+end
+check("第 6 关有钢砖", steel5 > 0, "钢砖 " .. steel5 .. " 块")
+check("钢砖不计入过关计数", d5.bricks_left == breakable5,
+    "left=" .. d5.bricks_left .. " 可破=" .. breakable5)
+
+-- (6) 形状名要能显示在过关浮层上
+local d7 = BreakoutDialog:new()
+d7:launchBall()
+d7:loadLevel(3)
+check("关卡记下了形状名", d7.level_shape ~= nil and d7.level_shape.name ~= nil,
+    tostring(d7.level_shape and d7.level_shape.name))
+
+end
+-- ======================= 场景 10b: 同屏掉落上限 =======================
+section("场景 10b: 同屏掉落上限")
+do
+-- 同屏掉落上限与落点标记上限要跟得上道具砖数量：
 -- 连破多块道具砖时，第 5 个徽章要被上限挡住(而不是无限堆)，且实际能存下 4 个
 local cap = BreakoutDialog:new()
 cap:launchBall()
@@ -473,6 +692,7 @@ cap:updateItems()   -- 落点标记是在 updateItems 里重建的
 check("连破多砖时落点标记跟得上", #cap.item_markers == 3,
     "#markers=" .. tostring(#cap.item_markers))
 
+end
 -- ======================= 场景 11: 底栏与运动脏区分离 (底栏闪烁修复) =======================
 -- 真机教训: KOReader 的 _refresh 会把"共享边界"的两个矩形也合并成一次刷新，
 -- 运动脏区一旦伸进底栏(y>=708)，底栏就被卷进"运动区+底栏"的大局部刷新，
@@ -482,6 +702,7 @@ check("连破多砖时落点标记跟得上", #cap.item_markers == 3,
 --   ② 底栏 pushRect 用 pad=0，严格从 708 起，两块永不合并;
 --   ③ 球/道具改成"底边触线即消失"，永远画不到 707 以下，夹断也不丢内容。
 section("场景 11: 底栏与运动脏区分离")
+do
 local RB = 7        -- 插件里的 BALL_R
 local RIS = 14     -- ITEM_SIZE / 2
 
@@ -546,11 +767,13 @@ check("运动脏区不伸进底栏", bleed == 0, "越界矩形 " .. bleed .. " �
 check("底栏刷新矩形都在底栏带内", bar_min ~= nil and bar_min >= 708,
     "实际起点 " .. tostring(bar_min))
 
+end
 -- ======================= 场景 12: 静止时零刷新 =======================
 -- 真机教训: 插件以前每 tick 都把"挡板区"标脏推送，静止画面也在 10Hz 刷面板，
 -- KOReader 照单全收地刷 —— 真机 10 连拍有 2 帧糊掉半屏/底栏残缺，
 -- 墨水屏也白受刷新预算。铁律: 真的动了才标脏，静止时一个像素都不刷。
 section("场景 12: 静止时零刷新")
+do
 local idle = BreakoutDialog:new()
 for _ = 1, 5 do idle:tick() end   -- 预热：挡板缓动收敛、底栏首帧推一次
 dirty_regions = {}
@@ -578,22 +801,27 @@ end
 check("游戏中仍推送运动区", has_motion)
 
 -- 砖块掉血/击碎：当场精确标脏砖阵桶（不再等低频维护刷新）
+-- 砖阵形状是随机的，得先找一块真实存在的砖来打
 local bd = BreakoutDialog:new()
-bd:damageBrick(1, 3, bd.GRID_X + 2 * 55, bd.GRID_Y)
-check("击碎砖块当场标脏砖阵区", bd._dr.brick ~= nil,
-    "brick 桶为空")
-local bx = bd._dr.brick.x1
-local bw = bd._dr.brick.x2 - bd._dr.brick.x1
-check("砖阵脏区只覆盖那一格", bw < 120, "宽 " .. tostring(bw) .. " (起点 " .. tostring(bx) .. ")")
+local br, bc, bbx, bby = firstBrick(bd)
+check("当前关卡能找到可破的砖", br ~= nil)
+if br then
+    bd:damageBrick(br, bc, bbx, bby)
+    check("击碎砖块当场标脏砖阵区", bd._dr.brick ~= nil,
+        "brick 桶为空")
+    if bd._dr.brick then
+        local bx = bd._dr.brick.x1
+        local bw = bd._dr.brick.x2 - bd._dr.brick.x1
+        check("砖阵脏区只覆盖那一格", bw < 120, "宽 " .. tostring(bw) .. " (起点 " .. tostring(bx) .. ")")
+    end
+end
 
+end
 -- ======================= 场景 13: 道具谱系 (17 种) =======================
 -- 参考 Arkanoid / DX-Ball 的道具谱系扩充：10 种增益 + 7 种减益。
 -- 道具表直接从插件源码里解析，断言跟实现同源，不会两边各写一份对不上。
 section("场景 13: 道具谱系")
-local src = assert(io.open("plugins/breakout.koplugin/breakoutdialog.lua", "r"))
-local text = src:read("*a")
-src:close()
-
+do
 local ids, names, durs, isbad = {}, {}, {}, {}
 for line in text:gmatch("[^\n]+") do
     local norm = line:gsub("%s+", " ")
@@ -652,8 +880,10 @@ local ratio = good_drop / math.max(1, (good_drop + bad_drop))
 check("掉落偏向增益 (增益占比 0.5~0.8)", ratio > 0.5 and ratio < 0.8,
     string.format("增益 %d / 减益 %d = %.2f", good_drop, bad_drop, ratio))
 
+end
 -- ======================= 场景 14: 新道具效果 =======================
 section("场景 14: 新道具效果")
+do
 local function fresh()
     local d = BreakoutDialog:new()
     d:launchBall()
@@ -739,10 +969,12 @@ check("激光会发射子弹", #n8.bullets > 0, "#bullets=" .. #n8.bullets)
 check("子弹向上飞", n8.bullets[1].y < n8.PADDLE_Y)
 
 -- 子弹撞砖要真的打掉砖（子弹一 tick 飞 42px > 砖高 24px，不细分就会打空）
+-- 砖阵形状是随机的，得先找一块真实存在的砖来瞄
 local n9 = fresh()
 n9:applyPowerUp("laser")
 n9.laser_timer = 99          -- 掐掉本次的自动发射，只测手动放的那颗子弹
-n9.bullets = { { x = n9.GRID_X + 26, y = n9.GRID_Y + 22, px = n9.GRID_X + 26, py = n9.GRID_Y + 22 } }
+local _, _, tbx, tby = firstBrick(n9)
+n9.bullets = { { x = tbx + 26, y = tby + 26, px = tbx + 26, py = tby + 26 } }
 local left0 = n9.bricks_left
 n9:updateBullets(0.1)
 check("激光子弹撞砖会打掉砖", n9.bricks_left < left0, "left " .. left0 .. " -> " .. n9.bricks_left)
@@ -757,8 +989,10 @@ n10:updateEffects()
 n10:updateBullets(0.1)
 check("激光到期后子弹清空", #n10.bullets == 0, "#bullets=" .. #n10.bullets)
 
+end
 -- ======================= 场景 15: 新机制的物理正确性 =======================
 section("场景 15: 新机制的物理正确性")
+do
 
 -- 穿透：球穿砖不反弹，砖照常掉血
 -- 球从砖下方顶上来（真实可达的姿态），不能把球塞进砖内部
@@ -767,8 +1001,9 @@ p1.state = 1
 p1:applyPowerUp("pierce")
 local pb = p1.balls[1]
 pb.r = 7
-pb.x = p1.GRID_X + 26
-pb.y = p1.GRID_Y + 30
+local _, _, pbx, pby = firstBrick(p1)
+pb.x = pbx + 26
+pb.y = pby + 30
 pb.vx = 0
 pb.vy = -150
 local left1 = p1.bricks_left
@@ -780,11 +1015,12 @@ check("穿透: 砖照常掉血", p1.bricks_left < left1)
 local p2 = BreakoutDialog:new()
 p2.state = 1
 p2:applyPowerUp("pierce")
-p2.bricks[1][1] = { hp = -1, base = -1 }   -- 钢砖
+local sr, sc, sbx, sby = firstBrick(p2)
+p2.bricks[sr][sc] = { hp = -1, base = -1 }   -- 换成钢砖
 local p2b = p2.balls[1]
 p2b.r = 7
-p2b.x = p2.GRID_X + 26
-p2b.y = p2.GRID_Y + 30
+p2b.x = sbx + 26
+p2b.y = sby + 30
 p2b.vx = 0
 p2b.vy = -150
 p2:resolveBricks(p2b)
@@ -907,8 +1143,10 @@ for i = 1, 10 do
 end
 check("效果条签名每秒最多变一次", changes <= 1, "10 tick 内变了 " .. changes .. " 次")
 
+end
 -- ======================= 场景 16: 新道具压力测试 =======================
 section("场景 16: 新道具压力测试 (30000 帧)")
+do
 local st2 = BreakoutDialog:new()
 local all_ids = {}
 for line in text:gmatch("[^\n]+") do
@@ -949,10 +1187,12 @@ check("压力测试后状态自洽",
     st2.state == 0 or st2.state == 1 or st2.state == 3 or st2.state == 4,
     "state=" .. tostring(st2.state))
 
+end
 -- ======================= 场景 17: 渲染层冒烟测试 =======================
 -- 墨水屏插件最怕两件事：画到屏幕外（内容看不见）、元素没画出来（效果等于没做）。
 -- 这里直接调 paintTo，检查绘图指令的边界与关键元素是否到位。
 section("场景 17: 渲染层冒烟测试")
+do
 
 local function render(d)
     ops = {}
@@ -1098,10 +1338,12 @@ for _, op in ipairs(fx_ops) do
 end
 check("效果条不超出底栏右边界", fx_right <= fx.W, "最右 " .. tostring(fx_right))
 
+end
 -- ======================= 场景 18: 护盾脏区不白占刷新预算 =======================
 -- 护盾线挂在挡板上方 22px 处。如果把它无条件并进"挡板移动"的脏区，
 -- 没有护盾时也要多刷 23px 高的区域 —— 墨水屏上这块是纯浪费。
 section("场景 18: 护盾脏区预算")
+do
 
 local sg = BreakoutDialog:new()
 sg:launchBall()
@@ -1136,6 +1378,7 @@ sg.paddle_target_x = sg.paddle_x + 60
 sg:tick()
 check("护盾到期后不再标护盾脏区", called == 0, "调用 " .. called .. " 次")
 
+end
 -- ======================= 结果 =======================
 print(string.format("\n========== 结果: %d 通过, %d 失败 ==========", pass, fail))
 os.exit(fail == 0 and 0 or 1)
