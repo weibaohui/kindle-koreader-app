@@ -116,6 +116,13 @@ local text = (function()
     return t
 end)()
 
+-- 道具下落速度 / 道具边长也从源码解析。
+-- 场景 20 的断言把道具放在"还有 N 秒到接球线"的位置，速度一改这些 y 就得跟着换；
+-- 写死 y 的话，改一次常量就有几十条断言同时失效（而且不报错，只是悄悄测错东西）。
+local ITEM_FALL_SPEED = tonumber(text:match("local ITEM_FALL_SPEED%s*=%s*([%d%.]+)"))
+local ITEM_SIZE = tonumber(text:match("local ITEM_SIZE%s*=%s*([%d%.]+)"))
+assert(ITEM_FALL_SPEED and ITEM_SIZE, "解析 ITEM_FALL_SPEED / ITEM_SIZE 失败")
+
 -- ======================= 测试框架 =======================
 local pass, fail = 0, 0
 local function check(name, cond, detail)
@@ -1500,13 +1507,27 @@ do
 
 local RAD = 7 -- BALL_R
 
+-- 道具位置一律用"还有几秒到接球线"描述，再按当前下落速度反算 y。
+-- 这样改 ITEM_FALL_SPEED 时断言的语义（还剩几秒）不变，
+-- 也不用每次都去重排一堆硬编码的 y 值。
+local PAD_Y = BreakoutDialog:new().PADDLE_Y
+local function itemY(eta)
+    return PAD_Y - ITEM_SIZE / 2 - eta * ITEM_FALL_SPEED
+end
+
+-- 20.0 下落速度本身要够慢：道具从砖阵区底边掉到接球线，得多留几秒给玩家反应
+local g0 = BreakoutDialog:new()
+local drop_secs = (PAD_Y - ITEM_SIZE / 2 - (g0.GRID_Y + g0.GRID_H)) / ITEM_FALL_SPEED
+check("道具下落够慢：从砖阵区底边掉到接球线 ≥ 8 秒",
+    drop_secs >= 8, string.format("只有 %.1f 秒", drop_secs))
+
 -- 20.1 顺路：两区间相交 + 两者差不多同时到线 -> 目标取交集中心
 -- 用例要避开"白捡"：道具区间不能包含球落点 300，否则命中的是白捡档。
--- 球在 y=400 下落 -> tBall=2.55s；道具 eta 要落在 [2.20, 2.55] -> eta=2.4s（y=528）
+-- 球在 y=400 下落 -> tBall=2.55s；道具 eta 要落在 [2.20, 2.55] -> eta=2.4s
 -- 道具在 380 -> 道具区间 [332,428]，球区间 [245,355]，交集 [332,355] -> 中心 343.5
 local g1 = BreakoutDialog:new()
 g1.paddle_x = 300
-g1.items = { { id = "extend", x = 380, y = 528, px = 380, py = 528, checked = false } }
+g1.items = { { id = "extend", x = 380, y = itemY(2.4), px = 380, py = itemY(2.4), checked = false } }
 local b1 = { x = 300, y = 400, vx = 0, vy = 100, r = RAD }
 local t1 = g1:aiItemTarget(300, b1)
 check("顺路：目标同时落在球和道具两个接取区间里",
@@ -1516,7 +1537,7 @@ check("顺路：目标 = 交集中心", math.abs(t1 - 343.5) < 0.01, "target=" .
 -- 20.2 白捡：球落点本来就在道具区间里 -> 目标不挪（不是交集中心）
 local g2 = BreakoutDialog:new()
 g2.paddle_x = 300
-g2.items = { { id = "extend", x = 270, y = 528, px = 270, py = 528, checked = false } }
+g2.items = { { id = "extend", x = 270, y = itemY(2.4), px = 270, py = itemY(2.4), checked = false } }
 local t2 = g2:aiItemTarget(300, b1)
 -- 道具区间 [222,318] 含 300 -> 白捡，保持 300（交集中心会是 281.5）
 check("白捡：球落点已在道具区间内，目标不挪", math.abs(t2 - 300) < 0.01,
@@ -1525,7 +1546,7 @@ check("白捡：球落点已在道具区间内，目标不挪", math.abs(t2 - 30
 -- 20.3 球优先：道具马上就要过线、赶不过去 -> 目标仍是球落点
 local g3 = BreakoutDialog:new()
 g3.paddle_x = 300
-g3.items = { { id = "extend", x = 480, y = 645, px = 480, py = 645, checked = false } }
+g3.items = { { id = "extend", x = 480, y = itemY(0.06), px = 480, py = itemY(0.06), checked = false } }
 local b3 = { x = 300, y = 600, vx = 0, vy = 100, r = RAD }
 local t3 = g3:aiItemTarget(300, b3)
 check("球优先：来不及接的道具不改变目标", math.abs(t3 - 300) < 0.01,
@@ -1534,7 +1555,7 @@ check("球优先：来不及接的道具不改变目标", math.abs(t3 - 300) < 0
 -- 20.4 绕路：接完道具还能赶回来接球 -> 先去接道具
 local g4 = BreakoutDialog:new()
 g4.paddle_x = 300
-g4.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+g4.items = { { id = "extend", x = 480, y = itemY(1.0), px = 480, py = itemY(1.0), checked = false } }
 local b4 = { x = 300, y = 300, vx = 0, vy = 100, r = RAD }
 local t4 = g4:aiItemTarget(300, b4)
 check("绕路：时间确实来得及就先去接道具", math.abs(t4 - 480) < 0.01,
@@ -1543,7 +1564,7 @@ check("绕路：时间确实来得及就先去接道具", math.abs(t4 - 480) < 0
 -- 20.5 球优先：球快到了就不为道具绕路
 local g5 = BreakoutDialog:new()
 g5.paddle_x = 300
-g5.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+g5.items = { { id = "extend", x = 480, y = itemY(1.0), px = 480, py = itemY(1.0), checked = false } }
 local b5 = { x = 300, y = 500, vx = 0, vy = 100, r = RAD }
 local t5 = g5:aiItemTarget(300, b5)
 check("球优先：球快到了就不为道具绕路", math.abs(t5 - 300) < 0.01,
@@ -1552,14 +1573,14 @@ check("球优先：球快到了就不为道具绕路", math.abs(t5 - 300) < 0.01
 -- 20.6 减益不追："掉命"道具直接扣一条命，AI 绕过去不接
 local g6 = BreakoutDialog:new()
 g6.paddle_x = 300
-g6.items = { { id = "drop", x = 480, y = 598, px = 480, py = 598, checked = false } }
+g6.items = { { id = "drop", x = 480, y = itemY(1.0), px = 480, py = itemY(1.0), checked = false } }
 local t6 = g6:aiItemTarget(300, b4)
 check("减益道具不追（掉命更不能碰）", math.abs(t6 - 300) < 0.01, "target=" .. tostring(t6))
 
 -- 20.7 球还在砖阵区（落点不可靠）时不绕路
 local g7 = BreakoutDialog:new()
 g7.paddle_x = 300
-g7.items = { { id = "extend", x = 480, y = 598, px = 480, py = 598, checked = false } }
+g7.items = { { id = "extend", x = 480, y = itemY(1.0), px = 480, py = itemY(1.0), checked = false } }
 local b7 = { x = 300, y = 200, vx = 0, vy = 100, r = RAD }
 local t7 = g7:aiItemTarget(300, b7)
 check("落点不可靠时不绕路（宁可接球也不冒险）", math.abs(t7 - 300) < 0.01,
@@ -1568,7 +1589,7 @@ check("落点不可靠时不绕路（宁可接球也不冒险）", math.abs(t7 -
 -- 20.8 已经判定过的道具（越过接球线）不再参与决策
 local g8 = BreakoutDialog:new()
 g8.paddle_x = 300
-g8.items = { { id = "extend", x = 380, y = 528, px = 380, py = 528, checked = true } }
+g8.items = { { id = "extend", x = 380, y = itemY(2.4), px = 380, py = itemY(2.4), checked = true } }
 local t8 = g8:aiItemTarget(300, b1)
 check("已判定的道具不再参与决策", math.abs(t8 - 300) < 0.01, "target=" .. tostring(t8))
 
@@ -1577,7 +1598,7 @@ local g9 = BreakoutDialog:new()
 g9.ai_mode = true
 g9.state = 1 -- PLAYING
 g9.balls = { { x = 300, y = 300, px = 300, py = 300, vx = 0, vy = 120, r = RAD } }
-g9.items = { { id = "extend", x = 300, y = 573, px = 300, py = 573, checked = false } }
+g9.items = { { id = "extend", x = 300, y = itemY(1.5), px = 300, py = itemY(1.5), checked = false } }
 for _ = 1, 40 do g9:tick() end
 check("端到端：AI 接住了下落的道具", g9.effects.extend ~= nil,
     "effects.extend=" .. tostring(g9.effects.extend))
@@ -1589,7 +1610,7 @@ local g10 = BreakoutDialog:new()
 g10.ai_mode = true
 g10.state = 1
 g10.balls = { { x = 320, y = 300, px = 320, py = 300, vx = 0, vy = 120, r = RAD } }
-g10.items = { { id = "extend", x = 220, y = 598, px = 220, py = 598, checked = false } }
+g10.items = { { id = "extend", x = 220, y = itemY(1.0), px = 220, py = itemY(1.0), checked = false } }
 for _ = 1, 45 do g10:tick() end
 check("端到端：绕路接道具也接住了", g10.effects.extend ~= nil,
     "effects.extend=" .. tostring(g10.effects.extend))

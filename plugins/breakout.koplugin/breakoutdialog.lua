@@ -57,7 +57,7 @@ local MAX_FX_SLOTS = 6            -- 底栏效果条最多同时显示几个道�
 
 -- ======================= 掉落道具 =======================
 local ITEM_SIZE = 28              -- 道具徽章边长
-local ITEM_FALL_SPEED = 50        -- 道具下落速度 (px/s)：再慢一倍，太快接不到
+local ITEM_FALL_SPEED = 35        -- 道具下落速度 (px/s)：100 → 50 → 35 一路调慢，太快根本腾不出手去接
 local ITEM_MAX_COUNT = 4          -- 同屏最多掉落道具数 (道具砖变多后要留得住)
 local ITEM_MARK_MAX = 3           -- 最多同时显示几个道具落点标记
 
