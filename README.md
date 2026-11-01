@@ -13,7 +13,7 @@
 | # | 功能 | 一句话 | 文档 | 截图 |
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | 🎮 **方块战争** (Tetris) | 全屏大视野的俄罗斯方块，长按加速下滑 | [介绍](docs/features/tetris.md) | ![](docs/screenshots/tetris_preview.png) |
-| 2 | 🧱 **砖石战场** (Breakout) | 挡板跟手的打砖块，每关随机形状 + 17 种道具 | [介绍](docs/features/breakout.md) | ![](docs/screenshots/breakout_preview.png) |
+| 2 | 🧱 **砖石战场** (Breakout) | 挡板跟手的打砖块，每关随机形状 + 17 种道具 + AI 辅助 | [介绍](docs/features/breakout.md) | ![](docs/screenshots/breakout_preview.png) |
 | 3 | 🔢 **数独** (Sudoku) | 唯一解保证的纸面数独，笔记/撤销/提示/存档 | [介绍](docs/features/sudoku.md) | ![](docs/screenshots/sudoku_preview.png) |
 | 4 | ♟️ **国际象棋** (Chess) | 同机双人对弈的完整规则国际象棋 | [介绍](docs/features/chess.md) | ![](docs/screenshots/chess_preview.png) |
 | 5 | 🐎 **中国象棋** (Xiangqi) | 汉字棋子，同机双人对弈 | [介绍](docs/features/xiangqi.md) | ![](docs/screenshots/xiangqi_preview.png) |
