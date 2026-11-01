@@ -890,6 +890,47 @@ local ratio = good_drop / math.max(1, (good_drop + bad_drop))
 check("掉落偏向增益 (增益占比 0.5~0.8)", ratio > 0.5 and ratio < 0.8,
     string.format("增益 %d / 减益 %d = %.2f", good_drop, bad_drop, ratio))
 
+-- 道具砖在生成时就定好掉什么，砖面上直接画图标：
+--  · 每块道具砖都要带 item id（砖面上画的就是它）
+--  · 掉出来的徽章必须和砖面上画的同一个（不能砖上画 A、掉出来 B）
+local d15 = BreakoutDialog:new()
+local pbricks = {}
+for r = 1, 6 do
+    for c = 1, 10 do
+        local br = d15.bricks[r][c]
+        if br and br.power then pbricks[#pbricks + 1] = { r = r, c = c, br = br } end
+    end
+end
+check("关卡里有道具砖", #pbricks > 0, "数量=" .. #pbricks)
+local missing, mismatched = 0, 0
+local valid_id = {} -- isbad 只给减益道具置 true，增益道具是 nil，不能拿它判合法性
+for _, id in ipairs(ids) do valid_id[id] = true end
+for _, p in ipairs(pbricks) do
+    local want = p.br.item
+    if not want or not valid_id[want] then
+        missing = missing + 1
+    else
+        local d = BreakoutDialog:new()
+        d.bricks[p.r][p.c] = { hp = 1, base = 1, power = true, item = want }
+        d.items = {}
+        d:damageBrick(p.r, p.c, 0, 0)
+        local it = d.items[1]
+        if not it or it.id ~= want then mismatched = mismatched + 1 end
+    end
+end
+check("每块道具砖都带 item id（砖面上直接画图标）", missing == 0, "缺失 " .. missing)
+check("砖面画的道具 = 掉出来的徽章", mismatched == 0, "不一致 " .. mismatched)
+
+-- 砖面上确实画了图标：道具砖的绘图指令应该明显多于普通砖
+local n_before = #ops
+d15:drawBrick(Blitbuffer, { hp = 1, base = 1, power = true, item = "slow" }, 0, 0)
+local with_icon = #ops - n_before
+n_before = #ops
+d15:drawBrick(Blitbuffer, { hp = 1, base = 1 }, 0, 0)
+local without_icon = #ops - n_before
+check("道具砖上画了道具图标（绘图指令比普通砖多）", with_icon > without_icon,
+    string.format("道具砖 %d 条 vs 普通砖 %d 条", with_icon, without_icon))
+
 end
 -- ======================= 场景 14: 新道具效果 =======================
 section("场景 14: 新道具效果")

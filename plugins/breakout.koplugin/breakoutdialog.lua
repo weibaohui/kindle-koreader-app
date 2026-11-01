@@ -38,6 +38,7 @@ local ROWS = 6
 local BRICK_W = 52
 local BRICK_H = 24
 local BRICK_GAP = 3
+local BRICK_POWER_ICON = 24        -- 道具砖上直接画的图标尺寸 (= 底栏效果条图标同尺寸)
 
 local PADDLE_W = 96               -- 默认挡板宽
 local PADDLE_W_LONG = 132         -- 加长道具
@@ -536,7 +537,9 @@ function BreakoutDialog:loadLevel(n)
             elseif ch == "#" then
                 brick = { hp = -1, base = -1 }
             elseif ch == "*" then
-                brick = { hp = 1, base = 1, power = true }
+                -- 道具砖：生成时就定好掉哪一种，砖面上直接画图标，
+                -- 玩家一眼就知道这块砖值不值得打
+                brick = { hp = 1, base = 1, power = true, item = self:rollPowerId() }
             end
             self.bricks[r][c] = brick
             if brick and brick.hp > 0 then
@@ -845,9 +848,9 @@ function BreakoutDialog:damageBrick(r, c, bx, by)
         local mult = 1 + math.min(self.combo - 1, 10) * 0.1
         local pts = br.power and 30 or (BRICK_SCORE[br.base] or 10)
         self.score = self.score + math.floor(pts * mult)
-        -- 道具砖被击碎 -> 掉出一个随机道具
+        -- 道具砖被击碎 -> 掉出它在砖面上就画着的那种道具
         if br.power then
-            self:spawnItem(bx + BRICK_W / 2, by + BRICK_H / 2)
+            self:spawnItem(bx + BRICK_W / 2, by + BRICK_H / 2, br.item)
         end
         -- 过关结算。一关只能结算一次：
         --   爆裂一次炸掉 9 块砖时，第一块可能已经把场上砖清空并触发了过关，
@@ -888,14 +891,21 @@ function BreakoutDialog:levelClear()
 end
 
 -- ======================= 掉落道具系统 =======================
-function BreakoutDialog:spawnItem(x, y)
-    if #self.items >= ITEM_MAX_COUNT then return end
-    -- 加权抽取：约 2/3 出增益、1/3 出减益。
-    -- 17 种等概率抽的话减益占 41%，手感太惩罚。
+-- 抽一个道具 id。加权抽取：约 2/3 出增益、1/3 出减益。
+-- 17 种等概率抽的话减益占 41%，手感太惩罚。
+function BreakoutDialog:rollPowerId()
     local list = (math.random(100) <= 66) and POWERUPS_GOOD or POWERUPS_BAD
-    local pu = list[math.random(#list)]
+    return list[math.random(#list)].id
+end
+
+function BreakoutDialog:spawnItem(x, y, id)
+    if #self.items >= ITEM_MAX_COUNT then return end
+    -- id 由道具砖在生成时就定好了（砖面上画的就是它）；这里只兜底
+    if not id then id = self:rollPowerId() end
+    local pu = POWERUP_BY_ID[id]
+    if not pu then return end
     self.items[#self.items + 1] = {
-        id = pu.id, x = x, y = y, px = x, py = y, checked = false,
+        id = id, x = x, y = y, px = x, py = y, checked = false,
     }
 end
 
@@ -1869,15 +1879,11 @@ end
 --   护盾 = 盾形       细球 = 漏斗     反转 = 左右箭头 掉命 = 下箭头
 --   隐形 = 点阵挡板   混乱 = 折线
 -- 增益用纯黑底白图标，减益用浅灰底黑图标 —— 玩家一眼可分好坏
-function BreakoutDialog:drawPowerIcon(bb, x, y, id, size)
-    local pu = POWERUP_BY_ID[id]
-    if not pu then return end
-    local fg = pu.bad and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
-    local bg = pu.bad and Blitbuffer.COLOR_GRAY_B or Blitbuffer.COLOR_BLACK
-    bb:paintRoundedRect(x, y, size, size, bg, 4)
-
-    local cx = math.floor(x + size / 2)
-    local cy = math.floor(y + size / 2)
+-- 道具图标"本体"（不含底板）：画在 (cx, cy) 中心，尺寸按 28px 基准等比缩放。
+-- bg 是"挖洞"用的底色（金币中间的方孔靠它掏空）。
+-- 单独拆出来，是为了让道具砖能把图标直接画在黑砖上（砖本身已经是黑底，
+-- 再套一层徽章底板会多出一圈白边，反而看不清）。
+function BreakoutDialog:drawPowerGlyph(bb, cx, cy, id, size, fg, bg)
     local s = size / 28 -- 图标按 28px 基准等比缩放
 
     if id == "extend" then
@@ -2004,6 +2010,67 @@ function BreakoutDialog:drawPowerIcon(bb, x, y, id, size)
     end
 end
 
+-- 完整徽章：底板 + 图标。
+-- 增益=纯黑底白图标，减益=浅灰底黑图标 —— 玩家一眼可分好坏。
+function BreakoutDialog:drawPowerIcon(bb, x, y, id, size)
+    local pu = POWERUP_BY_ID[id]
+    if not pu then return end
+    local fg = pu.bad and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
+    local bg = pu.bad and Blitbuffer.COLOR_GRAY_B or Blitbuffer.COLOR_BLACK
+    bb:paintRoundedRect(x, y, size, size, bg, 4)
+    self:drawPowerGlyph(bb, math.floor(x + size / 2), math.floor(y + size / 2), id, size, fg, bg)
+end
+
+-- 画一块砖（钢砖 / 血量砖 / 道具砖 / 普通砖）
+-- 单独抽成方法，好让离线渲染器直接调用线上代码，验的就是真实砖面
+function BreakoutDialog:drawBrick(bb, br, bx, by)
+    if br.hp < 0 then
+        -- 钢砖：浅灰底 + 黑描边 + 黑菱形点阵 (双重区分于可破砖)
+        bb:paintRoundedRect(bx, by, BRICK_W, BRICK_H, Blitbuffer.COLOR_GRAY_B, 3)
+        bb:paintRect(bx, by, BRICK_W, 2, Blitbuffer.COLOR_BLACK)
+        bb:paintRect(bx, by + BRICK_H - 2, BRICK_W, 2, Blitbuffer.COLOR_BLACK)
+        bb:paintRect(bx, by, 2, BRICK_H, Blitbuffer.COLOR_BLACK)
+        bb:paintRect(bx + BRICK_W - 2, by, 2, BRICK_H, Blitbuffer.COLOR_BLACK)
+        local ccx = math.floor(bx + BRICK_W / 2)
+        local ccy = math.floor(by + BRICK_H / 2)
+        for _, o in ipairs({ { 0, 0 }, { -9, -5 }, { 9, -5 }, { -9, 5 }, { 9, 5 } }) do
+            bb:paintRect(ccx + o[1] - 2, ccy + o[2] - 2, 4, 4, Blitbuffer.COLOR_BLACK)
+        end
+    else
+        -- 可破砖：普通砖=深灰底(退居背景层)，2/3 血砖与道具砖=纯黑
+        -- 颜色按"砖的原始类型 base"取，不按当前血量 —— 受创过的砖不能变色，
+        -- 否则一次击打会整块换灰阶(墨水屏残影重)且与普通砖混淆
+        local plain = (not br.power) and br.base == 1
+        local fill = plain and Blitbuffer.COLOR_GRAY_3 or Blitbuffer.COLOR_BLACK
+        bb:paintRoundedRect(bx, by, BRICK_W, BRICK_H, fill, 3)
+        local ccx = math.floor(bx + BRICK_W / 2)
+        local ccy = math.floor(by + BRICK_H / 2)
+        if br.power then
+            -- 道具砖：直接把道具图标画在砖里（白图标压在黑砖上）。
+            -- 以前这里画的是一颗白色菱形 pip，只能看出"这是道具砖"，
+            -- 看不出会掉什么 —— 玩家只能盲打。
+            -- 图标统一用白色：砖本身是黑的，白图标对比最强；
+            -- 增益/减益的区别留到徽章掉下来时再看（底板黑白不同）。
+            if br.item then
+                self:drawPowerGlyph(bb, ccx, ccy, br.item, BRICK_POWER_ICON,
+                                    Blitbuffer.COLOR_WHITE, Blitbuffer.COLOR_BLACK)
+            else
+                -- 兜底：没有 item 字段的老砖，退回原来的白色菱形 pip
+                for i = 0, 6 do
+                    local rw = 8 - 2 * math.abs(i - 3)
+                    bb:paintRect(ccx - math.floor(rw / 2), ccy - 7 + i * 2, rw, 2,
+                                 Blitbuffer.COLOR_WHITE)
+                end
+            end
+        elseif br.hp == 2 then
+            bb:paintRect(ccx - 4, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
+        elseif br.hp >= 3 then
+            bb:paintRect(ccx - 12, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
+            bb:paintRect(ccx + 4, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
+        end
+    end
+end
+
 function BreakoutDialog:paintTo(bb, x, y)
     local W, H = self.W, self.H
 
@@ -2029,44 +2096,11 @@ function BreakoutDialog:paintTo(bb, x, y)
             if br then
                 local bx = self.GRID_X + (c - 1) * (BRICK_W + BRICK_GAP)
                 local by = self.GRID_Y + (r - 1) * (BRICK_H + BRICK_GAP)
-                if br.hp < 0 then
-                    -- 钢砖：浅灰底 + 黑描边 + 黑菱形点阵 (双重区分于可破砖)
-                    bb:paintRoundedRect(bx, by, BRICK_W, BRICK_H, Blitbuffer.COLOR_GRAY_B, 3)
-                    bb:paintRect(bx, by, BRICK_W, 2, Blitbuffer.COLOR_BLACK)
-                    bb:paintRect(bx, by + BRICK_H - 2, BRICK_W, 2, Blitbuffer.COLOR_BLACK)
-                    bb:paintRect(bx, by, 2, BRICK_H, Blitbuffer.COLOR_BLACK)
-                    bb:paintRect(bx + BRICK_W - 2, by, 2, BRICK_H, Blitbuffer.COLOR_BLACK)
-                    local ccx = math.floor(bx + BRICK_W / 2)
-                    local ccy = math.floor(by + BRICK_H / 2)
-                    for _, o in ipairs({ { 0, 0 }, { -9, -5 }, { 9, -5 }, { -9, 5 }, { 9, 5 } }) do
-                        bb:paintRect(ccx + o[1] - 2, ccy + o[2] - 2, 4, 4, Blitbuffer.COLOR_BLACK)
-                    end
-                else
-                    -- 可破砖：普通砖=深灰底(退居背景层)，2/3 血砖与道具砖=纯黑
-                    -- 颜色按"砖的原始类型 base"取，不按当前血量 —— 受创过的砖不能变色，
-                    -- 否则一次击打会整块换灰阶(墨水屏残影重)且与普通砖混淆
-                    local plain = (not br.power) and br.base == 1
-                    local fill = plain and Blitbuffer.COLOR_GRAY_3 or Blitbuffer.COLOR_BLACK
-                    bb:paintRoundedRect(bx, by, BRICK_W, BRICK_H, fill, 3)
-                    local ccx = math.floor(bx + BRICK_W / 2)
-                    local ccy = math.floor(by + BRICK_H / 2)
-                    if br.power then
-                        -- 道具砖：白色菱形 pip（比血量方 pip 更大更尖，一眼可辨）
-                        -- 宽度序列 2,4,6,8,6,4,2 -> 对称菱形
-                        for i = 0, 6 do
-                            local rw = 8 - 2 * math.abs(i - 3)
-                            bb:paintRect(ccx - math.floor(rw / 2), ccy - 7 + i * 2, rw, 2, Blitbuffer.COLOR_WHITE)
-                        end
-                    elseif br.hp == 2 then
-                        bb:paintRect(ccx - 4, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
-                    elseif br.hp >= 3 then
-                        bb:paintRect(ccx - 12, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
-                        bb:paintRect(ccx + 4, ccy - 4, 8, 8, Blitbuffer.COLOR_WHITE)
-                    end
-                end
+                self:drawBrick(bb, br, bx, by)
             end
         end
     end
+
 
     -- ---------- 待发球：发射方向短射线 ----------
     if self.state == STATE_READY then
