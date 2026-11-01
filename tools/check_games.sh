@@ -101,26 +101,29 @@ else
     bad "重复的菜单 key: $(echo "$keys" | tr '\n' ' ')"
 fi
 
-# ---- 设备端 Lua 5.1 语法检查 ----
-head2 "设备端 LuaJIT 5.1 语法检查"
-if ! ssh -p "$PORT" -o ConnectTimeout=8 -o BatchMode=yes root@"$DEV" true 2>/dev/null; then
-    echo "  (跳过：设备不可达)"
-    exit $fail
+# ---- Lua 5.1 语法检查 ----
+# 优先用设备上的 luajit（与真机运行时完全一致）；
+# 设备不可达时退回本机 luajit（brew install luajit），同样能查 5.1 语法。
+head2 "Lua 5.1 语法检查"
+LOCAL_LUAJIT=""
+if command -v luajit >/dev/null 2>&1; then
+    LOCAL_LUAJIT=$(command -v luajit)
 fi
 
-tmp=$(mktemp -d)
-for g in "${GAMES[@]}"; do
-    d="$REPO/plugins/$g.koplugin"
-    [ -d "$d" ] || continue
-    mkdir -p "$tmp/$g"
-    cp "$d"/*.lua "$tmp/$g/" 2>/dev/null
-done
+if ssh -p "$PORT" -o ConnectTimeout=8 -o BatchMode=yes root@"$DEV" true 2>/dev/null; then
+    tmp=$(mktemp -d)
+    for g in "${GAMES[@]}"; do
+        d="$REPO/plugins/$g.koplugin"
+        [ -d "$d" ] || continue
+        mkdir -p "$tmp/$g"
+        cp "$d"/*.lua "$tmp/$g/" 2>/dev/null
+    done
 
-# 一次传过去，减少 SSH 往返
-ssh -p "$PORT" root@"$DEV" "rm -rf /tmp/kr_lint && mkdir -p /tmp/kr_lint" 2>/dev/null
-scp -P "$PORT" -q -r "$tmp"/. root@"$DEV":/tmp/kr_lint/ 2>/dev/null
+    # 一次传过去，减少 SSH 往返
+    ssh -p "$PORT" root@"$DEV" "rm -rf /tmp/kr_lint && mkdir -p /tmp/kr_lint" 2>/dev/null
+    scp -P "$PORT" -q -r "$tmp"/. root@"$DEV":/tmp/kr_lint/ 2>/dev/null
 
-out=$(ssh -p "$PORT" root@"$DEV" '
+    out=$(ssh -p "$PORT" root@"$DEV" '
   for f in $(find /tmp/kr_lint -name "*.lua" | sort); do
     if /mnt/us/koreader/luajit -e "local f,err=loadfile([[$f]]); if not f then io.stderr:write(tostring(err)) os.exit(1) end" 2>/tmp/kr_lint_err; then
       echo "OK $f"
@@ -131,14 +134,32 @@ out=$(ssh -p "$PORT" root@"$DEV" '
   rm -rf /tmp/kr_lint /tmp/kr_lint_err
 ' 2>&1)
 
-while IFS= read -r line; do
-    case "$line" in
-        OK*)   ok "${line#OK }" ;;
-        FAIL*) bad "${line#FAIL }" ;;
-    esac
-done <<< "$out"
+    while IFS= read -r line; do
+        case "$line" in
+            OK*)   ok "${line#OK }" ;;
+            FAIL*) bad "${line#FAIL }" ;;
+        esac
+    done <<< "$out"
 
-rm -rf "$tmp"
+    rm -rf "$tmp"
+elif [ -n "$LOCAL_LUAJIT" ]; then
+    echo "  (设备不可达，改用本机 luajit: $LOCAL_LUAJIT)"
+    for g in "${GAMES[@]}"; do
+        d="$REPO/plugins/$g.koplugin"
+        [ -d "$d" ] || continue
+        for f in "$d"/*.lua; do
+            [ -f "$f" ] || continue
+            if "$LOCAL_LUAJIT" -bl "$f" /dev/null 2>/tmp/kr_lint_err; then
+                ok "${f#$REPO/}"
+            else
+                bad "${f#$REPO/} : $(cat /tmp/kr_lint_err)"
+            fi
+        done
+    done
+    rm -f /tmp/kr_lint_err
+else
+    echo "  (跳过：设备不可达，本机也没有 luajit，装一个 brew install luajit 即可离线检查)"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

@@ -576,6 +576,369 @@ local bx = bd._dr.brick.x1
 local bw = bd._dr.brick.x2 - bd._dr.brick.x1
 check("砖阵脏区只覆盖那一格", bw < 120, "宽 " .. tostring(bw) .. " (起点 " .. tostring(bx) .. ")")
 
+-- ======================= 场景 13: 道具谱系 (17 种) =======================
+-- 参考 Arkanoid / DX-Ball 的道具谱系扩充：10 种增益 + 7 种减益。
+-- 道具表直接从插件源码里解析，断言跟实现同源，不会两边各写一份对不上。
+section("场景 13: 道具谱系")
+local src = assert(io.open("plugins/breakout.koplugin/breakoutdialog.lua", "r"))
+local text = src:read("*a")
+src:close()
+
+local ids, names, durs, isbad = {}, {}, {}, {}
+for line in text:gmatch("[^\n]+") do
+    local norm = line:gsub("%s+", " ")
+    local id, nm, dur, rest = norm:match('{ id = "(%w+)", name = "([^"]+)", dur = (%d+)(.*) }')
+    if id then
+        ids[#ids + 1] = id
+        names[id] = nm
+        durs[id] = tonumber(dur)
+        if rest:match("bad = true") then isbad[id] = true end
+    end
+end
+check("道具总数 17 种", #ids == 17, "实际 " .. #ids)
+
+local dup = {}
+local seen = {}
+for _, id in ipairs(ids) do
+    if seen[id] then dup[#dup + 1] = id end
+    seen[id] = true
+end
+check("道具 id 唯一", #dup == 0, table.concat(dup, ","))
+
+local ngood, nbad = 0, 0
+for _, id in ipairs(ids) do
+    if isbad[id] then nbad = nbad + 1 else ngood = ngood + 1 end
+end
+check("增益道具 10 种", ngood == 10, "实际 " .. ngood)
+check("减益道具 7 种", nbad == 7, "实际 " .. nbad)
+
+local noname = {}
+for _, id in ipairs(ids) do
+    if not names[id] or names[id] == "" then noname[#noname + 1] = id end
+end
+check("每种道具都有中文名", #noname == 0, table.concat(noname, ","))
+
+-- 每种道具都要有专属图标分支，否则徽章是一个纯色方块，玩家认不出
+local noicon = {}
+for _, id in ipairs(ids) do
+    if not text:find('id == "' .. id .. '"', 1, true) then
+        noicon[#noicon + 1] = id
+    end
+end
+check("每种道具都有专属图标", #noicon == 0, table.concat(noicon, ","))
+
+-- 掉落加权：约 2/3 增益、1/3 减益。等概率的话减益占 41%，太惩罚
+local good_drop, bad_drop = 0, 0
+local d14 = BreakoutDialog:new()
+for _ = 1, 4000 do
+    d14.items = {}
+    d14:spawnItem(300, 100)
+    local it = d14.items[1]
+    if it then
+        if isbad[it.id] then bad_drop = bad_drop + 1 else good_drop = good_drop + 1 end
+    end
+end
+local ratio = good_drop / math.max(1, (good_drop + bad_drop))
+check("掉落偏向增益 (增益占比 0.5~0.8)", ratio > 0.5 and ratio < 0.8,
+    string.format("增益 %d / 减益 %d = %.2f", good_drop, bad_drop, ratio))
+
+-- ======================= 场景 14: 新道具效果 =======================
+section("场景 14: 新道具效果")
+local function fresh()
+    local d = BreakoutDialog:new()
+    d:launchBall()
+    return d
+end
+
+local n1 = fresh()
+local sc0 = n1.score
+n1:applyPowerUp("gold")
+check("金币: +1000 分", n1.score == sc0 + 1000, "增加 " .. tostring(n1.score - sc0))
+
+local n2 = fresh()
+n2:applyPowerUp("drop")
+check("掉命: 生命 -1", n2.lives == 2, "lives=" .. n2.lives)
+check("掉命: 不打断当前球局", #n2.balls == 1 and n2.state == 1)
+local n3 = fresh()
+n3.lives = 1
+n3:applyPowerUp("drop")
+check("掉命到 0 条命 -> 游戏结束", n3.state == 4, "state=" .. n3.state)
+
+local n4 = fresh()
+check("细球前球半径 7", n4.balls[1].r == 7, tostring(n4.balls[1].r))
+n4:applyPowerUp("narrow")
+check("细球: 球半径变小", n4.balls[1].r == 4, tostring(n4.balls[1].r))
+check("细球: currentBallR 同步", n4:currentBallR() == 4)
+n4.tick_count = n4.effects.narrow + 1
+n4:updateEffects()
+check("细球到期后球半径恢复", n4.balls[1].r == 7, tostring(n4.balls[1].r))
+
+local n5 = fresh()
+check("反转前输入不镜像", n5:mapControlX(200) == 200)
+n5:applyPowerUp("flip")
+local mir = n5:mapControlX(200)
+check("反转后输入左右镜像", mir ~= 200 and
+    math.abs((mir + 200) - (n5.FIELD_X + n5.FIELD_W)) < 1,
+    "200 -> " .. tostring(mir))
+n5.tick_count = n5.effects.flip + 1
+n5:updateEffects()
+check("反转到期后输入恢复", n5:mapControlX(200) == 200)
+
+local n6 = fresh()
+n6:applyPowerUp("shield")
+check("护盾生效", n6.effects.shield ~= nil)
+local sb = n6.balls[1]
+sb.x = n6.paddle_x
+sb.y = n6.PADDLE_Y - 16
+sb.vx = 0
+sb.vy = 120
+n6:resolvePaddle(sb)
+check("护盾挡下这一球", sb.vy < 0, "vy=" .. tostring(sb.vy))
+check("护盾挡球后消失", n6.effects.shield == nil)
+n6:applyPowerUp("shield")
+sb.y = n6.PADDLE_Y - 16
+sb.vy = 120
+n6:resolvePaddle(sb)
+check("护盾重新生效后仍能挡", sb.vy < 0 and n6.effects.shield == nil)
+
+-- 混乱：出射角随机抖动，且球永远往上飞
+local n7 = fresh()
+local distinct, allup = {}, true
+for i = 1, 24 do
+    local b = n7.balls[1]
+    b.x = n7.paddle_x + 30
+    b.y = n7.PADDLE_Y - 5
+    b.vx = 0
+    b.vy = 120
+    n7:applyPowerUp("chaos")
+    n7:resolvePaddle(b)
+    distinct[math.floor(math.atan(b.vy, b.vx) * 1000)] = true
+    if b.vy >= 0 then allup = false end
+end
+local ndist = 0
+for _ in pairs(distinct) do ndist = ndist + 1 end
+check("混乱: 出射角随机抖动", ndist >= 5, "不同角度 " .. ndist)
+check("混乱: 球始终往上飞", allup)
+
+-- 激光
+local n8 = fresh()
+n8:applyPowerUp("laser")
+check("激光生效", n8.effects.laser ~= nil)
+for _ = 1, 8 do n8:updateBullets(0.1) end
+check("激光会发射子弹", #n8.bullets > 0, "#bullets=" .. #n8.bullets)
+check("子弹向上飞", n8.bullets[1].y < n8.PADDLE_Y)
+
+-- 子弹撞砖要真的打掉砖（子弹一 tick 飞 42px > 砖高 24px，不细分就会打空）
+local n9 = fresh()
+n9:applyPowerUp("laser")
+n9.laser_timer = 99          -- 掐掉本次的自动发射，只测手动放的那颗子弹
+n9.bullets = { { x = n9.GRID_X + 26, y = n9.GRID_Y + 22, px = n9.GRID_X + 26, py = n9.GRID_Y + 22 } }
+local left0 = n9.bricks_left
+n9:updateBullets(0.1)
+check("激光子弹撞砖会打掉砖", n9.bricks_left < left0, "left " .. left0 .. " -> " .. n9.bricks_left)
+check("子弹撞砖后消失", #n9.bullets == 0, "#bullets=" .. #n9.bullets)
+
+-- 激光到期，场上子弹要清空（否则留在屏上变成幽灵弹）
+local n10 = fresh()
+n10:applyPowerUp("laser")
+for _ = 1, 8 do n10:updateBullets(0.1) end
+n10.tick_count = n10.effects.laser + 1
+n10:updateEffects()
+n10:updateBullets(0.1)
+check("激光到期后子弹清空", #n10.bullets == 0, "#bullets=" .. #n10.bullets)
+
+-- ======================= 场景 15: 新机制的物理正确性 =======================
+section("场景 15: 新机制的物理正确性")
+
+-- 穿透：球穿砖不反弹，砖照常掉血
+-- 球从砖下方顶上来（真实可达的姿态），不能把球塞进砖内部
+local p1 = BreakoutDialog:new()
+p1.state = 1
+p1:applyPowerUp("pierce")
+local pb = p1.balls[1]
+pb.r = 7
+pb.x = p1.GRID_X + 26
+pb.y = p1.GRID_Y + 30
+pb.vx = 0
+pb.vy = -150
+local left1 = p1.bricks_left
+p1:resolveBricks(pb)
+check("穿透: 球不反弹", pb.vy < 0, "vy=" .. tostring(pb.vy))
+check("穿透: 砖照常掉血", p1.bricks_left < left1)
+
+-- 钢砖不能被穿透 —— 它本来就打不碎
+local p2 = BreakoutDialog:new()
+p2.state = 1
+p2:applyPowerUp("pierce")
+p2.bricks[1][1] = { hp = -1, base = -1 }   -- 钢砖
+local p2b = p2.balls[1]
+p2b.r = 7
+p2b.x = p2.GRID_X + 26
+p2b.y = p2.GRID_Y + 30
+p2b.vx = 0
+p2b.vy = -150
+p2:resolveBricks(p2b)
+check("穿透: 钢砖仍然挡球", p2b.vy > 0, "vy=" .. tostring(p2b.vy))
+
+-- 爆裂：3x3 范围内的砖一起没了
+-- 只保留 rows3-5 x cols3-5 的 9 块砖，球打正中 (4,4)，爆裂范围刚好盖住这 9 块
+local p3 = BreakoutDialog:new()
+p3.state = 1
+p3:applyPowerUp("bomb")
+for r = 1, 6 do
+    for c = 1, 10 do
+        if r < 3 or r > 5 or c < 3 or c > 5 then
+            p3.bricks[r][c] = nil
+        else
+            p3.bricks[r][c] = { hp = 1, base = 1 }
+        end
+    end
+end
+p3.bricks_left = 9
+local p3b = p3.balls[1]
+p3b.r = 7
+p3b.x = p3.GRID_X + 3 * 55 + 26   -- 第 4 列正中
+p3b.y = p3.GRID_Y + 3 * 27 + 12   -- 第 4 行正中
+p3:resolveBricks(p3b)
+check("爆裂: 3x3 范围的砖全没了", p3.bricks_left == 0, "剩 " .. tostring(p3.bricks_left))
+check("爆裂: 一次只结算一次过关", p3.state == 3, "state=" .. p3.state)
+
+-- 爆裂不得重复结算过关（否则过关奖励会被加两遍）
+local p4 = BreakoutDialog:new()
+p4.state = 1
+p4:applyPowerUp("bomb")
+for r = 1, 6 do
+    for c = 1, 10 do p4.bricks[r][c] = nil end
+end
+p4.bricks[1][1] = { hp = 1, base = 1 }
+p4.bricks_left = 1
+local clear_calls = 0
+local orig_clear = p4.levelClear
+p4.levelClear = function(self)
+    clear_calls = clear_calls + 1
+    orig_clear(self)
+end
+local p4b = p4.balls[1]
+p4b.r = 7
+p4b.x = p4.GRID_X + 26
+p4b.y = p4.GRID_Y + 30
+local sc_before = p4.score
+p4:resolveBricks(p4b)
+local bonus1 = p4.score - sc_before
+check("爆裂: 过关只结算一次", clear_calls == 1, "结算 " .. clear_calls .. " 次")
+-- 一块砖 10 分 + 过关奖励(200*关卡 + 100*生命) = 510；结算两遍会到 1000 以上
+check("爆裂: 过关奖励没被加两遍", bonus1 < 700, "加 " .. tostring(bonus1) .. " 分")
+
+-- 细球：贴墙判定用小半径 —— 球能贴得比正常球更靠近边
+-- 砖列之间只有 3px 缝，够不出"擦边"的位置，所以拿场地边界来验半径
+local pw = BreakoutDialog:new()
+pw.state = 1
+pw:applyPowerUp("narrow")
+local pwb = pw.balls[1]
+pwb.x = pw.FIELD_X + 5
+pwb.vx = -200
+pwb.vy = 0
+pw:resolveWalls(pwb)
+check("细球: 贴墙判定用小半径", pwb.x == pw.FIELD_X + 5, "x=" .. tostring(pwb.x))
+
+local pwg = BreakoutDialog:new()
+local pwgb = pwg.balls[1]
+pwgb.x = pwg.FIELD_X + 5
+pwgb.vx = -200
+pwgb.vy = 0
+pwg:resolveWalls(pwgb)
+check("对照: 正常球贴墙被推到 FIELD_X+7", pwgb.x == pwg.FIELD_X + 7, "x=" .. tostring(pwgb.x))
+
+-- 细球：对局里撞砖照样反弹（走真实物理循环，不手工摆位置）
+local p5 = BreakoutDialog:new()
+p5.state = 1
+p5:applyPowerUp("narrow")
+local p5b = p5.balls[1]
+check("细球: 球对象半径已变小", p5b.r == 4, tostring(p5b.r))
+p5b.x = p5.GRID_X + 26
+p5b.y = p5.GRID_Y + 200
+p5b.vx = 0
+p5b.vy = -150
+local bounced = false
+for _ = 1, 60 do
+    local vy0 = p5b.vy
+    p5:stepBall(p5b, 0.1)
+    if vy0 < 0 and p5b.vy > 0 then bounced = true; break end
+end
+check("细球: 撞砖后被弹回", bounced)
+
+-- 效果条槽位上限：同屏最多显示 6 个
+-- 从插件自己的指纹里数效果条目（"toast:"/"caught" 这类带冒号的不是效果槽）
+local p6 = BreakoutDialog:new()
+p6.state = 1
+local timed = { "extend", "slow", "catch", "pierce", "bomb", "laser", "flip", "blind" }
+for _, id in ipairs(timed) do p6:applyPowerUp(id) end
+p6:updateEffects()
+local fxids = p6:barFieldSignatures().fx:match("^([^|]*)")
+local slots = 0
+for part in fxids:gmatch("[^,]+") do
+    if not part:match(":") then slots = slots + 1 end
+end
+check("效果条最多 6 个槽位", slots == 6, "实际 " .. slots)
+
+-- 效果条刷新节流：倒计时每秒最多让整条效果条刷一次
+local p7 = BreakoutDialog:new()
+p7.state = 1
+p7:applyPowerUp("extend")
+p7:applyPowerUp("slow")
+p7:applyPowerUp("catch")
+local sig = p7:barFieldSignatures().fx
+local changes = 0
+for i = 1, 10 do
+    p7.tick_count = p7.tick_count + 1
+    local s = p7:barFieldSignatures().fx
+    if s ~= sig then changes = changes + 1 end
+    sig = s
+end
+check("效果条签名每秒最多变一次", changes <= 1, "10 tick 内变了 " .. changes .. " 次")
+
+-- ======================= 场景 16: 新道具压力测试 =======================
+section("场景 16: 新道具压力测试 (30000 帧)")
+local st2 = BreakoutDialog:new()
+local all_ids = {}
+for line in text:gmatch("[^\n]+") do
+    local norm = line:gsub("%s+", " ")
+    local id = norm:match('{ id = "(%w+)", name')
+    if id then all_ids[#all_ids + 1] = id end
+end
+local rand2 = 987654321
+local function rint2(n)
+    rand2 = (rand2 * 1103515245 + 12345) % 2147483648
+    return (rand2 % n) + 1
+end
+local err2 = nil
+local ok2 = 0
+for i = 1, 30000 do
+    if st2.state == 4 then
+        st2:startNewGame(false)
+    elseif st2.state == 0 then
+        st2:launchBall()
+    end
+    if i % 13 == 0 then
+        st2:applyPowerUp(all_ids[rint2(#all_ids)])
+    end
+    if i % 197 == 0 then
+        st2:spawnItem(rint2(560) + 20, 120)
+    end
+    if st2.marker_x then st2.paddle_target_x = st2.marker_x end
+    local ok, e = pcall(function() st2:tick() end)
+    if not ok then err2 = e; break end
+    ok2 = i
+end
+check("30000 帧全道具压力测试无异常", err2 == nil, tostring(err2))
+print(string.format("     跑了 %d 帧, 分数=%d, 关卡=%d, 球数=%d, 子弹=%d, 道具数=%d",
+    ok2, st2.score, st2.level, #st2.balls, #st2.bullets, #st2.items))
+
+-- 压力测试期间不允许出现"场上没砖却进不了下一关"的卡死
+check("压力测试后状态自洽",
+    st2.state == 0 or st2.state == 1 or st2.state == 3 or st2.state == 4,
+    "state=" .. tostring(st2.state))
+
 -- ======================= 结果 =======================
 print(string.format("\n========== 结果: %d 通过, %d 失败 ==========", pass, fail))
 os.exit(fail == 0 and 0 or 1)

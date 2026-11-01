@@ -44,9 +44,16 @@ local PADDLE_W_LONG = 132         -- 加长道具
 local PADDLE_W_SHORT = 64         -- 变短道具
 local PADDLE_H = 12
 local BALL_R = 7
+local BALL_R_SMALL = 4            -- "细球"道具生效时的球半径
 local MAX_LIVES = 3
 local MAX_LIVES_CAP = 5           -- 加命道具的上限
 local MAX_BALLS = 4               -- 多球道具的球数上限
+local SHIELD_GAP = 22             -- 护盾线挂在挡板上方多少像素
+local LASER_INTERVAL = 4          -- 激光发射间隔 (tick)
+local LASER_SPEED = 420           -- 激光子弹速度 (px/s)
+local LASER_BULLET_R = 3          -- 激光子弹的碰撞半径
+local CHAOS_JITTER = 0.45         -- 混乱道具的出射角抖动 (rad)
+local MAX_FX_SLOTS = 6            -- 底栏效果条最多同时显示几个道具
 
 -- ======================= 掉落道具 =======================
 local ITEM_SIZE = 28              -- 道具徽章边长
@@ -56,17 +63,41 @@ local ITEM_MARK_MAX = 3           -- 最多同时显示几个道具落点标记
 
 -- 道具表。bad = 减益(浅灰底)，其余为增益(纯黑底)。
 -- dur = 持续秒数，0 表示即时生效。
+-- 谱系参考经典 Arkanoid / DX-Ball：加长、多球、减速、加命、吸盘之外，
+-- 补上金币、穿透、爆裂、激光、护盾五类增益，与细球、反转、掉命、隐形、混乱五类减益。
 local POWERUPS = {
+    -- ---------- 增益(10 种) ----------
     { id = "extend", name = "加长", dur = 12 },
     { id = "multi",  name = "多球", dur = 0 },
     { id = "slow",   name = "减速", dur = 12 },
     { id = "life",   name = "加命", dur = 0 },
     { id = "catch",  name = "吸盘", dur = 10 },
+    { id = "gold",   name = "金币", dur = 0 },
+    { id = "pierce", name = "穿透", dur = 8 },
+    { id = "bomb",   name = "爆裂", dur = 8 },
+    { id = "laser",  name = "激光", dur = 8 },
+    { id = "shield", name = "护盾", dur = 20 },
+    -- ---------- 减益(7 种) ----------
     { id = "shrink", name = "变短", dur = 10, bad = true },
     { id = "fast",   name = "加速", dur = 8,  bad = true },
+    { id = "narrow", name = "细球", dur = 12, bad = true },
+    { id = "flip",   name = "反转", dur = 8,  bad = true },
+    { id = "drop",   name = "掉命", dur = 0,  bad = true },
+    { id = "blind",  name = "隐形", dur = 6,  bad = true },
+    { id = "chaos",  name = "混乱", dur = 10, bad = true },
 }
 local POWERUP_BY_ID = {}
-for _, pu in ipairs(POWERUPS) do POWERUP_BY_ID[pu.id] = pu end
+-- 增益/减益分开存一份：掉落时按 2:1 加权抽，17 种等概率的话减益占 41%，太惩罚
+local POWERUPS_GOOD = {}
+local POWERUPS_BAD = {}
+for _, pu in ipairs(POWERUPS) do
+    POWERUP_BY_ID[pu.id] = pu
+    if pu.bad then
+        POWERUPS_BAD[#POWERUPS_BAD + 1] = pu
+    else
+        POWERUPS_GOOD[#POWERUPS_GOOD + 1] = pu
+    end
+end
 
 -- ======================= 物理与节奏常量 =======================
 local TICK = 0.10              -- 游戏主循环周期 (10Hz)
@@ -211,6 +242,10 @@ function BreakoutDialog:init()
     -- 多球：balls 为球数组；caught_ball 为被吸盘吸附的那一颗
     self.balls = {}
     self.caught_ball = nil
+
+    -- 激光：挡板自动向上发射的子弹
+    self.bullets = {}
+    self.laser_timer = 0
 
     -- 挡板宽度会被道具改变
     self.paddle_w = PADDLE_W
@@ -404,6 +439,8 @@ function BreakoutDialog:startNewGame(full)
     self.items = {}
     self.toast = nil
     self.paddle_w = PADDLE_W
+    self.bullets = {}
+    self.laser_timer = 0
     self:loadLevel(1)
     self.state = STATE_READY
     self.state_before_pause = nil
@@ -423,6 +460,8 @@ function BreakoutDialog:nextLevel()
     self.items = {}
     self.toast = nil
     self.paddle_w = PADDLE_W
+    self.bullets = {}
+    self.laser_timer = 0
     self:loadLevel(self.level)
     self.state = STATE_READY
     self.marker_x = nil
@@ -433,11 +472,19 @@ end
 
 function BreakoutDialog:resetBallToPaddle()
     -- 每次重置只保留一颗待发球
-    local x, y = self.paddle_x, self.PADDLE_Y - BALL_R - 1
-    self.balls = { { x = x, y = y, vx = 0, vy = 0, px = x, py = y } }
+    local r = self:currentBallR()
+    local x, y = self.paddle_x, self.PADDLE_Y - r - 1
+    self.balls = { { x = x, y = y, vx = 0, vy = 0, px = x, py = y, r = r } }
     self.caught_ball = nil
     -- 新球是凭空冒出来的，得显式标脏一次，否则它不在旧位置列表里、永远刷不出来
-    self:markRect(x - BALL_R - 2, y - BALL_R - 2, x + BALL_R + 2, y + BALL_R + 2)
+    self:markRect(x - r - 2, y - r - 2, x + r + 2, y + r + 2)
+end
+
+-- 当前生效的球半径。"细球"道具期间球变小，过期后恢复。
+-- 半径存在球对象上(r 字段)，不用全局查表 —— 碰撞路径每帧要跑很多次。
+function BreakoutDialog:currentBallR()
+    if self.effects.narrow then return BALL_R_SMALL end
+    return BALL_R
 end
 
 -- 基础球速（不含道具修正），底栏显示用
@@ -473,22 +520,25 @@ function BreakoutDialog:launchBall()
     if self.state ~= STATE_READY then return end
     local b = self.balls[1]
     if not b then return end
+    local r = b.r or BALL_R
     local speed = self:currentSpeed()
     local ang = -math.pi / 2 + (math.random() * 2 - 1) * math.rad(26)
     b.vx = math.cos(ang) * speed
     b.vy = math.sin(ang) * speed
     b.x = self.paddle_x
-    b.y = self.PADDLE_Y - BALL_R - 1
+    b.y = self.PADDLE_Y - r - 1
     b.px, b.py = b.x, b.y
     self.state = STATE_PLAYING
 end
 
 -- ======================= 碰撞检测 =======================
-function BreakoutDialog:brickAt(x, y)
-    local r0 = math.floor((y - BALL_R - self.GRID_Y) / (BRICK_H + BRICK_GAP)) + 1
-    local r1 = math.floor((y + BALL_R - self.GRID_Y) / (BRICK_H + BRICK_GAP)) + 1
-    local c0 = math.floor((x - BALL_R - self.GRID_X) / (BRICK_W + BRICK_GAP)) + 1
-    local c1 = math.floor((x + BALL_R - self.GRID_X) / (BRICK_W + BRICK_GAP)) + 1
+-- rad = 碰撞半径，默认用当前球的半径("细球"道具会让它变小)
+function BreakoutDialog:brickAt(x, y, rad)
+    rad = rad or self:currentBallR()
+    local r0 = math.floor((y - rad - self.GRID_Y) / (BRICK_H + BRICK_GAP)) + 1
+    local r1 = math.floor((y + rad - self.GRID_Y) / (BRICK_H + BRICK_GAP)) + 1
+    local c0 = math.floor((x - rad - self.GRID_X) / (BRICK_W + BRICK_GAP)) + 1
+    local c1 = math.floor((x + rad - self.GRID_X) / (BRICK_W + BRICK_GAP)) + 1
     for r = r0, r1 do
         if r >= 1 and r <= ROWS then
             for c = c0, c1 do
@@ -497,8 +547,8 @@ function BreakoutDialog:brickAt(x, y)
                     if br then
                         local bx = self.GRID_X + (c - 1) * (BRICK_W + BRICK_GAP)
                         local by = self.GRID_Y + (r - 1) * (BRICK_H + BRICK_GAP)
-                        if x + BALL_R > bx and x - BALL_R < bx + BRICK_W
-                            and y + BALL_R > by and y - BALL_R < by + BRICK_H then
+                        if x + rad > bx and x - rad < bx + BRICK_W
+                            and y + rad > by and y - rad < by + BRICK_H then
                             return r, c, bx, by
                         end
                     end
@@ -510,9 +560,10 @@ function BreakoutDialog:brickAt(x, y)
 end
 
 function BreakoutDialog:resolveWalls(b)
-    local left = self.FIELD_X + BALL_R
-    local right = self.FIELD_X + self.FIELD_W - BALL_R
-    local top = self.FIELD_Y + BALL_R
+    local r = b.r or BALL_R
+    local left = self.FIELD_X + r
+    local right = self.FIELD_X + self.FIELD_W - r
+    local top = self.FIELD_Y + r
     if b.x < left then
         b.x = left
         b.vx = math.abs(b.vx)
@@ -528,7 +579,7 @@ function BreakoutDialog:resolveWalls(b)
     -- 旧写法要球顶越过底线才判死，球心能跑到 711、球底 718，会压到底栏(708起)
     -- 画在状态栏上；而运动脏区还会外扩 14px，直接伸进底栏触发合并刷新。
     -- 改成球底触到底线就消失，球永远画不到 707 以下，脏区夹断也不会丢内容。
-    if b.y + BALL_R > self.DEATH_Y then
+    if b.y + r > self.DEATH_Y then
         b.dead = true   -- 掉出底线，交给上层统一处理（多球时不是立刻扣命）
         return true
     end
@@ -537,10 +588,24 @@ end
 
 function BreakoutDialog:resolvePaddle(b)
     if b.vy <= 0 then return false end
-    if b.y + BALL_R < self.PADDLE_Y or b.y - BALL_R > self.PADDLE_Y + PADDLE_H then return false end
+    local r = b.r or BALL_R
     local half = self.paddle_w / 2
     local dx = b.x - self.paddle_x
-    if dx < -half - BALL_R or dx > half + BALL_R then return false end
+    if dx < -half - r or dx > half + r then return false end
+
+    -- 护盾：挡板上方一层护壁，接住这一球后护盾本身消失
+    if self.effects.shield then
+        local sy = self.PADDLE_Y - SHIELD_GAP
+        if b.y + r >= sy - 1 and b.y - r <= sy + 8 then
+            self.effects.shield = nil
+            b.y = sy - r - 0.5
+            b.vy = -math.abs(b.vy)
+            self.combo = 0
+            return true
+        end
+    end
+
+    if b.y + r < self.PADDLE_Y or b.y - r > self.PADDLE_Y + PADDLE_H then return false end
 
     -- 吸盘生效且尚未吸附球：把球粘在挡板上，等玩家点击释放
     if self.effects.catch and not self.caught_ball then
@@ -548,7 +613,7 @@ function BreakoutDialog:resolvePaddle(b)
         self.caught_ball = b
         b.vx, b.vy = 0, 0
         b.x = self.paddle_x
-        b.y = self.PADDLE_Y - BALL_R - 1
+        b.y = self.PADDLE_Y - r - 1
         b.px, b.py = b.x, b.y
         self.combo = 0
         return true
@@ -559,43 +624,83 @@ function BreakoutDialog:resolvePaddle(b)
     if speed < 1 then speed = self:currentSpeed() end
     local off = math.max(-1, math.min(1, dx / half))
     local ang = off * MAX_SPIN
+    -- 混乱：出射角随机抖动。抖动量受限，保证 cos(ang)>0，球永远往上飞。
+    if self.effects.chaos then
+        ang = ang + (math.random() * 2 - 1) * CHAOS_JITTER
+    end
     b.vx = math.sin(ang) * speed
     b.vy = -math.cos(ang) * speed
     -- 保证横向分量不为 0，杜绝垂直死循环
     if math.abs(b.vx) < speed * MIN_VX_RATIO then
         b.vx = (b.vx >= 0 and 1 or -1) * speed * MIN_VX_RATIO
     end
-    b.y = self.PADDLE_Y - BALL_R - 0.5
+    b.y = self.PADDLE_Y - r - 0.5
     self.combo = 0 -- 连击在触板时清零
     return true
 end
 
 function BreakoutDialog:resolveBricks(b)
-    local r, c, bx, by = self:brickAt(b.x, b.y)
-    if not r then return false end
+    local r = b.r or BALL_R
+    local rr, c, bx, by = self:brickAt(b.x, b.y, r)
+    if not rr then return false end
 
-    -- 最小穿透轴反射
-    local dl = b.x - BALL_R - bx
-    local dr = bx + BRICK_W - (b.x + BALL_R)
-    local dt = b.y - BALL_R - by
-    local db = by + BRICK_H - (b.y + BALL_R)
-    local m = math.min(dl, dr, dt, db)
-    if m == dl then
-        b.x = bx - BALL_R - 0.5
-        b.vx = -math.abs(b.vx)
-    elseif m == dr then
-        b.x = bx + BRICK_W + BALL_R + 0.5
-        b.vx = math.abs(b.vx)
-    elseif m == dt then
-        b.y = by - BALL_R - 0.5
-        b.vy = -math.abs(b.vy)
-    else
-        b.y = by + BRICK_H + BALL_R + 0.5
-        b.vy = math.abs(b.vy)
+    local br = self.bricks[rr][c]
+    local steel = br and br.hp < 0
+    -- 穿透：球直接穿过砖块不反弹（钢砖仍然会挡，因为它压根打不碎）
+    local pierce = self.effects.pierce ~= nil and not steel
+
+    if not pierce then
+        -- 最小穿透轴反射
+        local dl = b.x - r - bx
+        local dr = bx + BRICK_W - (b.x + r)
+        local dt = b.y - r - by
+        local db = by + BRICK_H - (b.y + r)
+        local m = math.min(dl, dr, dt, db)
+        if m == dl then
+            b.x = bx - r - 0.5
+            b.vx = -math.abs(b.vx)
+        elseif m == dr then
+            b.x = bx + BRICK_W + r + 0.5
+            b.vx = math.abs(b.vx)
+        elseif m == dt then
+            b.y = by - r - 0.5
+            b.vy = -math.abs(b.vy)
+        else
+            b.y = by + BRICK_H + r + 0.5
+            b.vy = math.abs(b.vy)
+        end
     end
 
-    self:damageBrick(r, c, bx, by)
+    self:damageBrick(rr, c, bx, by)
+
+    -- 爆裂：撞砖时把周围 3x3 的砖一起炸掉
+    if self.effects.bomb then
+        self:explodeBricks(rr, c)
+    end
+
     return true
+end
+
+-- 爆裂：炸掉命中砖周围一圈(3x3)的砖
+function BreakoutDialog:explodeBricks(r, c)
+    if self.state ~= STATE_PLAYING then return end
+    for dr = -1, 1 do
+        for dc = -1, 1 do
+            if dr ~= 0 or dc ~= 0 then
+                -- 场上砖已被打空并结算过关，剩下的不用再炸
+                if self.state == STATE_LEVELCLEAR then return end
+                local rr, cc = r + dr, c + dc
+                if rr >= 1 and rr <= ROWS and cc >= 1 and cc <= COLS then
+                    local br = self.bricks[rr][cc]
+                    if br and br.hp > 0 then
+                        local bx = self.GRID_X + (cc - 1) * (BRICK_W + BRICK_GAP)
+                        local by = self.GRID_Y + (rr - 1) * (BRICK_H + BRICK_GAP)
+                        self:damageBrick(rr, cc, bx, by)
+                    end
+                end
+            end
+        end
+    end
 end
 
 function BreakoutDialog:damageBrick(r, c, bx, by)
@@ -624,7 +729,12 @@ function BreakoutDialog:damageBrick(r, c, bx, by)
         if br.power then
             self:spawnItem(bx + BRICK_W / 2, by + BRICK_H / 2)
         end
-        if self.bricks_left <= 0 then
+        -- 过关结算。一关只能结算一次：
+        --   爆裂一次炸掉 9 块砖时，第一块可能已经把场上砖清空并触发了过关，
+        --   后面几块再结算一次就会重复加过关奖励；
+        --   激光在待发球状态把砖打光时也必须能结算，否则场上没砖了却永远进不了下一关。
+        if self.bricks_left <= 0
+            and self.state ~= STATE_LEVELCLEAR and self.state ~= STATE_GAMEOVER then
             self:levelClear()
         end
     else
@@ -660,7 +770,10 @@ end
 -- ======================= 掉落道具系统 =======================
 function BreakoutDialog:spawnItem(x, y)
     if #self.items >= ITEM_MAX_COUNT then return end
-    local pu = POWERUPS[math.random(#POWERUPS)]
+    -- 加权抽取：约 2/3 出增益、1/3 出减益。
+    -- 17 种等概率抽的话减益占 41%，手感太惩罚。
+    local list = (math.random(100) <= 66) and POWERUPS_GOOD or POWERUPS_BAD
+    local pu = list[math.random(#list)]
     self.items[#self.items + 1] = {
         id = pu.id, x = x, y = y, px = x, py = y, checked = false,
     }
@@ -674,11 +787,31 @@ function BreakoutDialog:applyPowerUp(id)
         self:applyMulti()
     elseif id == "life" then
         self.lives = math.min(MAX_LIVES_CAP, self.lives + 1)
-    elseif id == "extend" or id == "shrink" or id == "catch" then
-        self.effects[id] = self.tick_count + pu.dur * 10
+    elseif id == "gold" then
+        self.score = self.score + 1000
+    elseif id == "drop" then
+        -- 掉命：直接扣一条命，但不打断当前球局
+        self.lives = self.lives - 1
+        self.combo = 0
+        if self.lives <= 0 then
+            self.lives = 0
+            self.state = STATE_GAMEOVER
+            self:saveHiscore()
+        end
     elseif id == "slow" or id == "fast" then
         self.effects[id] = self.tick_count + pu.dur * 10
         self:recomputeBallSpeeds()
+    elseif id == "narrow" then
+        self.effects[id] = self.tick_count + pu.dur * 10
+        for _, b in ipairs(self.balls) do
+            local oldr = b.r or BALL_R
+            b.r = BALL_R_SMALL
+            -- 球变小：旧的大圆要擦掉，否则墨水屏上留下一个球形残影
+            self:markRect(b.x - oldr - 2, b.y - oldr - 2, b.x + oldr + 2, b.y + oldr + 2)
+        end
+    else
+        -- 其余全是纯计时型效果：加长/变短/吸盘/穿透/爆裂/激光/护盾/反转/隐形/混乱
+        self.effects[id] = self.tick_count + pu.dur * 10
     end
 
     self.toast = { id = id, name = pu.name, expire = self.tick_count + 18 }
@@ -691,6 +824,7 @@ function BreakoutDialog:applyMulti()
         if not b.caught then sources[#sources + 1] = b end
     end
     local speed = self:currentSpeed()
+    local r = self:currentBallR()
     for _, b in ipairs(sources) do
         -- math.atan(y, x) 两参形式在 5.1 / 5.3 / LuaJIT 都可用
         local base = math.atan(b.vy, b.vx)
@@ -700,6 +834,7 @@ function BreakoutDialog:applyMulti()
             self.balls[#self.balls + 1] = {
                 x = b.x, y = b.y, px = b.x, py = b.y,
                 vx = math.cos(a) * speed, vy = math.sin(a) * speed,
+                r = r,
             }
         end
     end
@@ -711,12 +846,13 @@ function BreakoutDialog:releaseCaught()
     if not b then return false end
     self.caught_ball = nil
     b.caught = false
+    local r = b.r or BALL_R
     local speed = self:currentSpeed()
     local ang = -math.pi / 2 + (math.random() * 2 - 1) * math.rad(30)
     b.vx = math.cos(ang) * speed
     b.vy = math.sin(ang) * speed
     b.x = self.paddle_x
-    b.y = self.PADDLE_Y - BALL_R - 1
+    b.y = self.PADDLE_Y - r - 1
     b.px, b.py = b.x, b.y
     return true
 end
@@ -764,6 +900,13 @@ function BreakoutDialog:updateEffects()
             self.effects[pu.id] = nil
             if pu.id == "slow" or pu.id == "fast" then
                 self:recomputeBallSpeeds()
+            elseif pu.id == "narrow" then
+                for _, b in ipairs(self.balls) do
+                    local oldr = b.r or BALL_R
+                    b.r = BALL_R
+                    -- 球恢复：旧的小圆要擦掉再画大的
+                    self:markRect(b.x - oldr - 2, b.y - oldr - 2, b.x + oldr + 2, b.y + oldr + 2)
+                end
             end
         end
     end
@@ -782,6 +925,61 @@ function BreakoutDialog:updateEffects()
     end
 end
 
+-- 激光：挡板自动向上打子弹，子弹撞砖就把砖打掉
+function BreakoutDialog:updateBullets(dt)
+    -- 过关 / 结束时不再开火：一边结算画面一边打砖既没意义又要额外刷屏
+    local laser_on = self.effects.laser
+        and self.state ~= STATE_GAMEOVER and self.state ~= STATE_LEVELCLEAR
+    if not laser_on then
+        -- 效果到期：场上残留的子弹要擦掉，否则会停在半空变成幽灵弹
+        if #self.bullets > 0 then
+            for _, bu in ipairs(self.bullets) do
+                self:markRect(bu.x - 5, bu.y - 5, bu.x + 5, bu.y + 5)
+            end
+            self.bullets = {}
+        end
+        return
+    end
+
+    self.laser_timer = self.laser_timer - 1
+    if self.laser_timer <= 0 then
+        self.laser_timer = LASER_INTERVAL
+        local bx = self.paddle_x
+        local by = self.PADDLE_Y - 6
+        self.bullets[#self.bullets + 1] = { x = bx, y = by, px = bx, py = by }
+        -- 新子弹是凭空冒出来的，得显式标脏一次
+        self:markRect(bx - 5, by - 5, bx + 5, by + 5)
+    end
+
+    local alive = {}
+    for _, bu in ipairs(self.bullets) do
+        local sx, sy = bu.x, bu.y
+        local hit = false
+        -- 子弹一 tick 要飞 42px，比砖块(24px)还高，直接一步跨过去会打空。
+        -- 拆成 <= SUBSTEP 的子步逐段检测，和球用同一套路。
+        local dist = LASER_SPEED * dt
+        local steps = math.max(1, math.ceil(dist / SUBSTEP))
+        local sdt = dt / steps
+        for _ = 1, steps do
+            bu.px, bu.py = bu.x, bu.y
+            bu.y = bu.y - LASER_SPEED * sdt
+            local r, c, bx, by = self:brickAt(bu.x, bu.y, LASER_BULLET_R)
+            if r then
+                self:damageBrick(r, c, bx, by)
+                hit = true
+                break
+            end
+        end
+        -- 整条飞行路径都要标脏：只标首尾的话中间那段不会被刷掉，会留下断掉的弹道
+        self:markRect(math.min(sx, bu.x) - 5, math.min(sy, bu.y) - 5,
+                      math.max(sx, bu.x) + 5, math.max(sy, bu.y) + 5)
+        if not hit and bu.y >= self.FIELD_Y then
+            alive[#alive + 1] = bu
+        end
+    end
+    self.bullets = alive
+end
+
 -- ======================= 物理推进 =======================
 function BreakoutDialog:stepBall(b, dt)
     local speed = math.sqrt(b.vx * b.vx + b.vy * b.vy)
@@ -797,7 +995,10 @@ function BreakoutDialog:stepBall(b, dt)
         b.y = b.y + b.vy * sdt
         if self:resolveWalls(b) then return end
         if self:resolvePaddle(b) then return end
-        if self:resolveBricks(b) then return end
+        if self:resolveBricks(b) then
+            -- 穿透生效时不反弹，继续走下一个子步
+            if not self.effects.pierce then return end
+        end
     end
 end
 
@@ -811,7 +1012,7 @@ function BreakoutDialog:stepBalls(dt)
             -- 吸附中的球跟随挡板
             b.px, b.py = b.x, b.y
             b.x = self.paddle_x
-            b.y = self.PADDLE_Y - BALL_R - 1
+            b.y = self.PADDLE_Y - (b.r or BALL_R) - 1
             alive[#alive + 1] = b
         else
             self:stepBall(b, dt)
@@ -828,6 +1029,7 @@ end
 function BreakoutDialog:predictLanding(src)
     local b = src or self.balls[1]
     if not b then return nil end
+    local rad = b.r or BALL_R
     local x, y, vx, vy = b.x, b.y, b.vx, b.vy
     local step = 6
     local bounces = 0
@@ -835,9 +1037,9 @@ function BreakoutDialog:predictLanding(src)
         x = x + vx * step
         y = y + vy * step
 
-        local left = self.FIELD_X + BALL_R
-        local right = self.FIELD_X + self.FIELD_W - BALL_R
-        local top = self.FIELD_Y + BALL_R
+        local left = self.FIELD_X + rad
+        local right = self.FIELD_X + self.FIELD_W - rad
+        local top = self.FIELD_Y + rad
         if x < left then
             x = left; vx = -vx
         elseif x > right then
@@ -847,29 +1049,29 @@ function BreakoutDialog:predictLanding(src)
             y = top; vy = -vy
         end
 
-        if y >= self.GRID_Y - BALL_R and y <= self.GRID_Y + self.GRID_H + BALL_R then
-            local r, c, bx, by = self:brickAt(x, y)
+        if y >= self.GRID_Y - rad and y <= self.GRID_Y + self.GRID_H + rad then
+            local r, c, bx, by = self:brickAt(x, y, rad)
             if r then
                 bounces = bounces + 1
                 if bounces > 3 then return nil end
-                local dl = x - BALL_R - bx
-                local dr = bx + BRICK_W - (x + BALL_R)
-                local dt = y - BALL_R - by
-                local db = by + BRICK_H - (y + BALL_R)
+                local dl = x - rad - bx
+                local dr = bx + BRICK_W - (x + rad)
+                local dt = y - rad - by
+                local db = by + BRICK_H - (y + rad)
                 local m = math.min(dl, dr, dt, db)
                 if m == dl then
-                    x = bx - BALL_R - 1; vx = -math.abs(vx)
+                    x = bx - rad - 1; vx = -math.abs(vx)
                 elseif m == dr then
-                    x = bx + BRICK_W + BALL_R + 1; vx = math.abs(vx)
+                    x = bx + BRICK_W + rad + 1; vx = math.abs(vx)
                 elseif m == dt then
-                    y = by - BALL_R - 1; vy = -math.abs(vy)
+                    y = by - rad - 1; vy = -math.abs(vy)
                 else
-                    y = by + BRICK_H + BALL_R + 1; vy = math.abs(vy)
+                    y = by + BRICK_H + rad + 1; vy = math.abs(vy)
                 end
             end
         end
 
-        if y >= self.PADDLE_Y - BALL_R then
+        if y >= self.PADDLE_Y - rad then
             return x
         end
     end
@@ -884,6 +1086,15 @@ function BreakoutDialog:clampPaddle(x)
     return math.max(lo, math.min(hi, x))
 end
 
+-- "反转"道具生效时，左右输入被镜像：往右拖，挡板往左走。
+-- 映射只作用在输入上，挡板自身的坐标是连续的，所以道具到期时不会突然跳位。
+function BreakoutDialog:mapControlX(x)
+    if self.effects.flip then
+        return self.FIELD_X + self.FIELD_W - x
+    end
+    return x
+end
+
 function BreakoutDialog:updatePaddle()
     local target = self:clampPaddle(self.paddle_target_x)
     local dx = target - self.paddle_x
@@ -895,7 +1106,7 @@ function BreakoutDialog:updatePaddle()
         -- 待发球的球跟随挡板
         for _, b in ipairs(self.balls) do
             b.x = self.paddle_x
-            b.y = self.PADDLE_Y - BALL_R - 1
+            b.y = self.PADDLE_Y - (b.r or BALL_R) - 1
             b.px, b.py = b.x, b.y
         end
     end
@@ -953,6 +1164,28 @@ function BreakoutDialog:pushRect(d, pad)
     end
 end
 
+-- 挡板的"外观签名"：挡板位置/宽度不变，但外观变了（隐形/激光/护盾）也必须重画，
+-- 否则墨水屏上会留着上一种外观的残影。
+function BreakoutDialog:paddleLook()
+    local look = ""
+    if self.effects.blind then look = look .. "B" end
+    if self.effects.laser then look = look .. "L" end
+    if self.effects.shield then look = look .. "S" end
+    if look == "" then look = "N" end
+    return look
+end
+
+-- 标脏整块挡板区域（含护盾线）。
+-- 护盾线挂在挡板上方 SHIELD_GAP 处，护盾出现/消失时要单独擦掉。
+function BreakoutDialog:markPaddleDirty(ox, ow)
+    local ph = self.paddle_w / 2 + 3
+    local pho = (ow or self.paddle_w) / 2 + 3
+    self:markRect(ox - pho, self.PADDLE_Y - 3, ox + pho, self.PADDLE_Y + PADDLE_H + 3)
+    self:markRect(self.paddle_x - ph, self.PADDLE_Y - 3, self.paddle_x + ph, self.PADDLE_Y + PADDLE_H + 3)
+    self:markRect(self.paddle_x - ph, self.PADDLE_Y - SHIELD_GAP - 4,
+                  self.paddle_x + ph, self.PADDLE_Y - SHIELD_GAP + 4)
+end
+
 -- 底栏的 5 个数据格：分数/最高/生命/关卡/速度
 -- 每格单独一个刷新桶：只刷真正变化的那一格。
 -- 以前是整条底栏(580x92)一起刷，等于每打碎一块砖底栏就整块闪一下，
@@ -968,9 +1201,20 @@ local BAR_FIELDS = {
 -- 底栏逐字段指纹：只有变了的那一格才需要重绘
 function BreakoutDialog:barFieldSignatures()
     local fx = {}
+    -- 效果条只显示前 MAX_FX_SLOTS 个效果，签名也只算这几个，
+    -- 否则显示不出来的效果照样会每秒改一次签名，白白触发整条效果条刷新。
+    -- 倒计时用"最小剩余秒数"做指纹：所有效果每秒最多让签名变一次，
+    -- 而不是每个效果各变一次（那样同屏 6 个效果就是每秒 6 次整条刷新）。
+    local slot = 0
+    local minleft = nil
     for _, pu in ipairs(POWERUPS) do
         local e = self.effects[pu.id]
-        if e then fx[#fx + 1] = pu.id .. ":" .. tostring(math.max(0, math.ceil((e - self.tick_count) / 10))) end
+        if e and slot < MAX_FX_SLOTS then
+            slot = slot + 1
+            fx[#fx + 1] = pu.id
+            local left = math.max(0, math.ceil((e - self.tick_count) / 10))
+            if minleft == nil or left < minleft then minleft = left end
+        end
     end
     if self.toast then fx[#fx + 1] = "toast:" .. self.toast.id end
     if self.caught_ball then fx[#fx + 1] = "caught" end
@@ -980,7 +1224,7 @@ function BreakoutDialog:barFieldSignatures()
         lives = tostring(self.lives),
         level = tostring(self.level),
         speed = tostring(math.floor(self:currentSpeed())),
-        fx    = table.concat(fx, ","),
+        fx    = table.concat(fx, ",") .. "|" .. tostring(minleft or 0),
     }
 end
 
@@ -995,9 +1239,11 @@ function BreakoutDialog:barCellRect(idx)
 end
 
 --- 底栏效果条 / 提示行的刷新矩形
+--- 上界要盖住 6 个道具槽(12 + 6*54 = 336)加提示文字，
+--- 否则第 6 个槽以外的图标画出来了却刷不出来（会留在屏上不更新）。
 function BreakoutDialog:barFxRect()
     local by0 = self.H - BOTBAR_H
-    return 8, by0 + 51, 292, by0 + 71
+    return 8, by0 + 45, 440, by0 + 75
 end
 
 function BreakoutDialog:refreshAll()
@@ -1085,6 +1331,7 @@ function BreakoutDialog:tick()
     end
     local opx = self.paddle_x
     local opw = self.paddle_w -- 旧挡板宽度：变长/变短到期后要清理旧宽度的残影
+    local olook = self:paddleLook()  -- 旧外观：隐形/激光/护盾切换时要重画
     local omx = self.marker_x
     local omarkers = {}
     for _, m in ipairs(self.item_markers or {}) do omarkers[#omarkers + 1] = m end
@@ -1094,6 +1341,7 @@ function BreakoutDialog:tick()
         self:updateEffects()
         self:updatePaddle()
         self:updateItems()
+        self:updateBullets(TICK)
     end
 
     if self.state == STATE_PLAYING then
@@ -1111,20 +1359,18 @@ function BreakoutDialog:tick()
     -- 墨水屏上每 10Hz 推一次区域刷新，KOReader 会照单全收地刷面板，
     -- 轻则留下残影、重则被升级成全屏黑闪 —— 真机实测静止画面 10 连拍有 2 帧糊掉半屏。
     -- 所以静止时必须一个像素都不刷新。
-    local r = BALL_R + 2
+    -- 球半径改用 b.r（"细球"道具会让它变小），所以这里没有统一的 r
     for _, o in ipairs(oldballs) do
         local b = o.b
         if b.x ~= o.x or b.y ~= o.y then
-            self:markRect(o.x - r, o.y - r, o.x + r, o.y + r)   -- 旧位置要擦
-            self:markRect(b.x - r, b.y - r, b.x + r, b.y + r)   -- 新位置要画
+            local br = (b.r or BALL_R) + 2
+            self:markRect(o.x - br, o.y - br, o.x + br, o.y + br)   -- 旧位置要擦
+            self:markRect(b.x - br, b.y - br, b.x + br, b.y + br)   -- 新位置要画
         end
     end
-    -- 挡板：位置或宽度变了才标脏（缓动是浮点微移，dx=0 时完全不动）
-    if self.paddle_x ~= opx or self.paddle_w ~= opw then
-        local ph = self.paddle_w / 2 + 3
-        local pho = opw / 2 + 3
-        self:markRect(opx - pho, self.PADDLE_Y - 3, opx + pho, self.PADDLE_Y + PADDLE_H + 3)
-        self:markRect(self.paddle_x - ph, self.PADDLE_Y - 3, self.paddle_x + ph, self.PADDLE_Y + PADDLE_H + 3)
+    -- 挡板：位置、宽度或外观变了才标脏（缓动是浮点微移，dx=0 时完全不动）
+    if self.paddle_x ~= opx or self.paddle_w ~= opw or olook ~= self:paddleLook() then
+        self:markPaddleDirty(opx, opw)
     end
     -- 球的落点标记：位置变了才标脏
     if omx ~= self.marker_x then
@@ -1141,6 +1387,8 @@ function BreakoutDialog:tick()
             self:markRect(it.x - ir, it.y - ir, it.x + ir, it.y + ir)
         end
     end
+    -- 激光子弹的脏区在 updateBullets 里整条路径一起标（子弹一 tick 飞 42px，
+    -- 只标首尾会漏掉中间那段），这里不再重复比对。
     -- 道具落点标记（空心方框）：只有新增/消失才要重画，
     -- 位置不变的标记不需要标脏（道具是垂直直落的，x 不会变）。
     local old_marks = {}
@@ -1245,6 +1493,9 @@ end
 -- 道具图标：纯几何图形，靠"剪影"区分，不依赖颜色
 --   加长 = 满宽横杠   变短 = 窄横杠   多球 = 三个点
 --   减速 = 钟面       加速 = 双箭头   加命 = 十字   吸盘 = U 形碗
+--   金币 = 菱形       穿透 = 砖上穿箭 爆裂 = 圆球加刺 激光 = 炮座光柱
+--   护盾 = 盾形       细球 = 漏斗     反转 = 左右箭头 掉命 = 下箭头
+--   隐形 = 点阵挡板   混乱 = 折线
 -- 增益用纯黑底白图标，减益用浅灰底黑图标 —— 玩家一眼可分好坏
 function BreakoutDialog:drawPowerIcon(bb, x, y, id, size)
     local pu = POWERUP_BY_ID[id]
@@ -1291,6 +1542,93 @@ function BreakoutDialog:drawPowerIcon(bb, x, y, id, size)
         bb:paintRect(cx - math.floor(9 * s), cy - math.floor(6 * s), 3, math.floor(12 * s), fg)
         bb:paintRect(cx + math.floor(6 * s), cy - math.floor(6 * s), 3, math.floor(12 * s), fg)
         bb:paintRect(cx - math.floor(9 * s), cy + math.floor(3 * s), math.floor(18 * s), 3, fg)
+    elseif id == "gold" then
+        -- 菱形硬币：实心菱形中间掏个方孔
+        for i = -9, 9 do
+            local rw = 18 - 2 * math.abs(i)
+            if rw > 0 then
+                bb:paintRect(cx - math.floor(rw / 2), cy + i, rw, 1, fg)
+            end
+        end
+        bb:paintRect(cx - 4, cy - 4, 8, 8, bg)
+    elseif id == "pierce" then
+        -- 穿透：一根竖着的砖 + 一支从左穿到右的箭
+        bb:paintRect(cx - math.floor(10 * s), cy - math.floor(10 * s),
+                     math.floor(3 * s), math.floor(20 * s), fg)
+        bb:paintRect(cx - math.floor(8 * s), cy - 1, math.floor(14 * s), 2, fg)
+        for i = 0, 6 do
+            bb:paintRect(cx + math.floor((5 + i) * s), cy - math.floor((6 - i) * s), 2, 2, fg)
+            bb:paintRect(cx + math.floor((5 + i) * s), cy + math.floor((5 - i) * s), 2, 2, fg)
+        end
+    elseif id == "bomb" then
+        -- 爆裂：圆球 + 四向八根放射刺
+        bb:paintCircle(cx, cy, math.floor(6 * s), fg, 2)
+        for _, o in ipairs({ { 0, -12 }, { 0, 12 }, { -12, 0 }, { 12, 0 },
+                             { -9, -9 }, { 9, -9 }, { -9, 9 }, { 9, 9 } }) do
+            bb:paintRect(cx + math.floor(o[1] * s) - 1, cy + math.floor(o[2] * s) - 1, 2, 2, fg)
+        end
+    elseif id == "laser" then
+        -- 激光：底部炮座 + 向上的光柱 + 箭头
+        bb:paintRect(cx - math.floor(10 * s), cy + math.floor(6 * s),
+                     math.floor(20 * s), math.floor(3 * s), fg)
+        bb:paintRect(cx - 1, cy - math.floor(7 * s), 3, math.floor(14 * s), fg)
+        for i = 0, 4 do
+            bb:paintRect(cx - math.floor(i * s) - 1, cy - math.floor((11 - i) * s), 2, 2, fg)
+            bb:paintRect(cx + math.floor(i * s) - 1, cy - math.floor((11 - i) * s), 2, 2, fg)
+        end
+    elseif id == "shield" then
+        -- 护盾：上宽下尖的盾形轮廓
+        bb:paintRect(cx - math.floor(8 * s), cy - math.floor(9 * s), math.floor(16 * s), 2, fg)
+        bb:paintRect(cx - math.floor(8 * s), cy - math.floor(9 * s), 2, math.floor(11 * s), fg)
+        bb:paintRect(cx + math.floor(6 * s), cy - math.floor(9 * s), 2, math.floor(11 * s), fg)
+        for i = 0, 4 do
+            local yy = cy + math.floor((1 + i) * s)
+            bb:paintRect(cx + math.floor((5 - i) * s) - 1, yy, 2, 2, fg)
+            bb:paintRect(cx + math.floor((3 - i) * s) - 1, yy, 2, 2, fg)
+        end
+    elseif id == "narrow" then
+        -- 细球：上宽下窄的漏斗
+        bb:paintRect(cx - math.floor(10 * s), cy - math.floor(9 * s), math.floor(20 * s), 2, fg)
+        for i = 0, 8 do
+            local yy = cy - math.floor(6 * s) + i
+            bb:paintRect(cx - math.floor((9 - i) * s), yy, 2, 2, fg)
+            bb:paintRect(cx + math.floor((8 - i) * s), yy, 2, 2, fg)
+        end
+    elseif id == "flip" then
+        -- 反转：左右背离的双箭头
+        for i = 0, 5 do
+            local sp = i
+            bb:paintRect(cx - math.floor(11 * s) + i - 1, cy - sp - 1, 2, 2, fg)
+            bb:paintRect(cx - math.floor(11 * s) + i - 1, cy + sp - 1, 2, 2, fg)
+        end
+        bb:paintRect(cx - math.floor(6 * s), cy - 1, math.floor(6 * s), 2, fg)
+        bb:paintRect(cx, cy - 1, math.floor(6 * s), 2, fg)
+        for i = 0, 5 do
+            local sp = 5 - i
+            bb:paintRect(cx + math.floor(5 * s) + i - 1, cy - sp - 1, 2, 2, fg)
+            bb:paintRect(cx + math.floor(5 * s) + i - 1, cy + sp - 1, 2, 2, fg)
+        end
+    elseif id == "drop" then
+        -- 掉命：向下的箭头
+        bb:paintRect(cx - 1, cy - math.floor(10 * s), 3, math.floor(12 * s), fg)
+        for i = 0, 5 do
+            local sp = 5 - i
+            bb:paintRect(cx - sp - 1, cy + math.floor(1 * s) + i, 2, 2, fg)
+            bb:paintRect(cx + sp - 1, cy + math.floor(1 * s) + i, 2, 2, fg)
+        end
+    elseif id == "blind" then
+        -- 隐形：点阵状的挡板（实体被抹掉只剩虚影）
+        for i = 0, 3 do
+            bb:paintRect(cx - math.floor(10 * s) + i * math.floor(6 * s),
+                         cy - math.floor(2 * s), math.floor(3 * s), math.floor(4 * s), fg)
+        end
+    elseif id == "chaos" then
+        -- 混乱：来回折线
+        bb:paintRect(cx - math.floor(10 * s), cy - math.floor(8 * s), math.floor(9 * s), 2, fg)
+        bb:paintRect(cx - math.floor(2 * s), cy - math.floor(8 * s), 2, math.floor(9 * s), fg)
+        bb:paintRect(cx - math.floor(2 * s), cy - 1, math.floor(9 * s), 2, fg)
+        bb:paintRect(cx + math.floor(6 * s), cy - 1, 2, math.floor(9 * s), fg)
+        bb:paintRect(cx + math.floor(6 * s), cy + math.floor(6 * s), math.floor(6 * s), 2, fg)
     end
 end
 
@@ -1372,11 +1710,44 @@ function BreakoutDialog:paintTo(bb, x, y)
         end
     end
 
+    -- ---------- 护盾（挡板上方一层护壁，接住一球后消失） ----------
+    if self.effects.shield then
+        local sy = self.PADDLE_Y - SHIELD_GAP
+        local sw = self.paddle_w
+        local sx = math.floor(self.paddle_x - sw / 2)
+        -- 先铺白底，保证护盾从任何背景上都读得出来
+        bb:paintRect(sx, sy - 3, sw, 7, Blitbuffer.COLOR_WHITE)
+        local seg = 10
+        local n = math.max(2, math.floor(sw / seg))
+        for i = 0, n - 1 do
+            bb:paintRect(sx + i * seg, sy - 1, math.max(3, seg - 5), 3, Blitbuffer.COLOR_BLACK)
+        end
+    end
+
     -- ---------- 挡板（宽度会被道具改变） ----------
     local pw = self.paddle_w
     local px = math.floor(self.paddle_x - pw / 2)
-    bb:paintRoundedRect(px, self.PADDLE_Y, pw, PADDLE_H, Blitbuffer.COLOR_BLACK, 4)
-    bb:paintRect(px + 5, self.PADDLE_Y + 3, pw - 10, 2, Blitbuffer.COLOR_WHITE)
+    if self.effects.blind then
+        -- 隐形：实体不画，只留一圈浅灰虚线框，挡板位置还在但很难盯
+        local seg = 10
+        local n = math.max(2, math.floor(pw / seg))
+        for i = 0, n - 1 do
+            bb:paintRect(px + i * seg, self.PADDLE_Y, math.max(3, seg - 5), PADDLE_H,
+                         Blitbuffer.COLOR_GRAY_7)
+        end
+        bb:paintRect(px, self.PADDLE_Y, pw, 1, Blitbuffer.COLOR_GRAY_8)
+        bb:paintRect(px, self.PADDLE_Y + PADDLE_H - 1, pw, 1, Blitbuffer.COLOR_GRAY_8)
+    else
+        bb:paintRoundedRect(px, self.PADDLE_Y, pw, PADDLE_H, Blitbuffer.COLOR_BLACK, 4)
+        bb:paintRect(px + 5, self.PADDLE_Y + 3, pw - 10, 2, Blitbuffer.COLOR_WHITE)
+    end
+    -- 激光：挡板两侧装炮管
+    if self.effects.laser then
+        for _, sgn in ipairs({ -1, 1 }) do
+            local gx = math.floor(self.paddle_x + sgn * (pw / 2 - 7))
+            bb:paintRect(gx - 2, self.PADDLE_Y - 9, 4, 11, Blitbuffer.COLOR_BLACK)
+        end
+    end
 
     -- ---------- 落点标记（球：实心十字 + 黑心） ----------
     if self.marker_x then
@@ -1406,16 +1777,31 @@ function BreakoutDialog:paintTo(bb, x, y)
     -- ---------- 球（可能有多颗） ----------
     if self.state ~= STATE_GAMEOVER then
         for _, b in ipairs(self.balls) do
+            local br = b.r or BALL_R
             -- 白色描边：球是纯黑的，撞进纯黑砖/深灰砖里会看不清。
             -- 先画一圈白环再画黑球，白底上完全看不出来(白环融进背景)，
             -- 在任何深色砖上都能把球"抠"出来
-            bb:paintCircle(math.floor(b.x), math.floor(b.y), BALL_R + 2, Blitbuffer.COLOR_WHITE)
+            bb:paintCircle(math.floor(b.x), math.floor(b.y), br + 2, Blitbuffer.COLOR_WHITE)
             if b.px ~= b.x or b.py ~= b.y then
                 -- 拖尾短线：让"跳格"看起来是连续运动
                 self:paintLine(bb, b.px, b.py, b.x, b.y, 2, Blitbuffer.COLOR_BLACK)
             end
-            bb:paintCircle(math.floor(b.x), math.floor(b.y), BALL_R, Blitbuffer.COLOR_BLACK)
+            bb:paintCircle(math.floor(b.x), math.floor(b.y), br, Blitbuffer.COLOR_BLACK)
+            if self.effects.pierce then
+                -- 穿透状态：球心点一个白点，一眼能看出"球会穿砖"
+                bb:paintCircle(math.floor(b.x), math.floor(b.y),
+                               math.max(2, br - 3), Blitbuffer.COLOR_WHITE)
+            end
         end
+    end
+
+    -- ---------- 激光子弹 ----------
+    for _, bu in ipairs(self.bullets) do
+        local bx = math.floor(bu.x)
+        local by = math.floor(bu.y)
+        -- 同样先铺白边，深色砖上才看得见
+        bb:paintRect(bx - 2, by - 7, 5, 15, Blitbuffer.COLOR_WHITE)
+        bb:paintRect(bx - 1, by - 6, 3, 13, Blitbuffer.COLOR_BLACK)
     end
 
     -- ---------- 底栏 ----------
@@ -1454,7 +1840,7 @@ function BreakoutDialog:paintTo(bb, x, y)
     local slot = 0
     for _, pu in ipairs(POWERUPS) do
         local expiry = self.effects[pu.id]
-        if expiry and slot < 5 then
+        if expiry and slot < MAX_FX_SLOTS then
             slot = slot + 1
             self:drawPowerIcon(bb, ex, ey, pu.id, 24)
             local left = math.max(0, math.ceil((expiry - self.tick_count) / 10))
@@ -1463,13 +1849,13 @@ function BreakoutDialog:paintTo(bb, x, y)
             ex = ex + 54
         end
     end
-    if self.toast and slot < 5 then
-        slot = slot + 1
+    if self.toast then
+        -- 提示行总是要显示：槽位满了也不能把"刚接到什么道具"这条信息吞掉
         self:drawPowerIcon(bb, ex, ey, self.toast.id, 24)
         RenderText:renderUtf8Text(bb, ex + 28, ey + 17, self.font_mini, self.toast.name,
                                   false, false, Blitbuffer.COLOR_BLACK)
     end
-    if slot == 0 then
+    if slot == 0 and not self.toast then
         local hint = "拖动移板 · 点砖阵发球 · 双击发球/暂停"
         if self.caught_ball then hint = "轻触屏幕释放被吸附的球" end
         RenderText:renderUtf8Text(bb, ex, ey + 17, self.font_small, hint, false, false, Blitbuffer.COLOR_GRAY_5)
@@ -1565,9 +1951,9 @@ function BreakoutDialog:onTap(arg, ges)
         end
     end
 
-    -- 7) 点底部区：挡板绝对跳转
+    -- 7) 点底部区：挡板绝对跳转（"反转"道具生效时左右镜像）
     if y > self.GRID_Y + self.GRID_H then
-        self.paddle_target_x = self:clampPaddle(x)
+        self.paddle_target_x = self:clampPaddle(self:mapControlX(x))
     end
 
     return true
@@ -1592,10 +1978,12 @@ function BreakoutDialog:onPan(arg, ges)
     end
 
     local rel = ges.relative or { x = 0, y = 0 }
+    -- "反转"道具生效时，横向位移取反：手指往右拖，挡板往左走
+    local move = self.effects.flip and (-rel.x) or rel.x
     if not self.pan_anchor then
-        self.pan_anchor = self.paddle_x - rel.x
+        self.pan_anchor = self.paddle_x - move
     end
-    self.paddle_target_x = self:clampPaddle(self.pan_anchor + rel.x)
+    self.paddle_target_x = self:clampPaddle(self.pan_anchor + move)
     -- 渲染交给主循环统一刷新，避免高频重绘打爆 e-ink
     return true
 end
