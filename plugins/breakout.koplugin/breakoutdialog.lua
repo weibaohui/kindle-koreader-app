@@ -57,7 +57,14 @@ local MAX_FX_SLOTS = 6            -- 底栏效果条最多同时显示几个道�
 
 -- ======================= 掉落道具 =======================
 local ITEM_SIZE = 28              -- 道具徽章边长
-local ITEM_FALL_SPEED = 35        -- 道具下落速度 (px/s)：100 → 50 → 35 一路调慢，太快根本腾不出手去接
+local ITEM_FALL_SPEED = 12        -- 道具下落速度 (px/s)：100 → 50 → 35 → 12
+                                  -- 关键约束：每帧(10Hz)位移必须小于刷新频率能干净擦除的量级，
+                                  -- 即 ITEM_FALL_SPEED * TICK < 2 像素。墨水屏的残影是**物理层**的
+                                  -- （截图只看帧缓冲，拍不出来），表现为道具身后拖一条灰影。
+                                  -- 每帧只挪 1.2px，残影就退化成一条细线而不是一整片灰带。
+local ITEM_HALO = 3               -- 下落徽章的白边宽度 (px)
+                                  -- 和球的白描边同一个套路：徽章是纯黑方块，落在黑砖上会糊成一团，
+                                  -- 套一圈白底后在任何底色上都分得清
 local ITEM_MAX_COUNT = 4          -- 同屏最多掉落道具数 (道具砖变多后要留得住)
 local ITEM_MARK_MAX = 3           -- 最多同时显示几个道具落点标记
 
@@ -1740,7 +1747,8 @@ function BreakoutDialog:tick()
     end
 
     -- 下落道具的脏区
-    local ir = ITEM_SIZE / 2 + 2
+    -- 半径要连白边一起算进去：徽章本体 28px + 两侧各 3px 白边 + 2px 余量
+    local ir = ITEM_SIZE / 2 + ITEM_HALO + 2
     for _, o in ipairs(olditems) do
         local it = o.it
         if it.x ~= o.x or it.y ~= o.y then
@@ -2135,8 +2143,14 @@ function BreakoutDialog:paintTo(bb, x, y)
 
     -- ---------- 下落的道具徽章 ----------
     for _, it in ipairs(self.items) do
-        self:drawPowerIcon(bb, math.floor(it.x - ITEM_SIZE / 2),
-                               math.floor(it.y - ITEM_SIZE / 2), it.id, ITEM_SIZE)
+        local ix = math.floor(it.x - ITEM_SIZE / 2)
+        local iy = math.floor(it.y - ITEM_SIZE / 2)
+        -- 先铺一圈白底再画徽章本体：徽章是纯黑的，落在黑砖上会糊成一团，
+        -- 套白边后在任何底色上都能"抠"出来（和球的白描边同一个套路）
+        bb:paintRoundedRect(ix - ITEM_HALO, iy - ITEM_HALO,
+                             ITEM_SIZE + ITEM_HALO * 2, ITEM_SIZE + ITEM_HALO * 2,
+                             Blitbuffer.COLOR_WHITE, 6)
+        self:drawPowerIcon(bb, ix, iy, it.id, ITEM_SIZE)
     end
 
     -- ---------- 球（可能有多颗） ----------

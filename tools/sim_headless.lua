@@ -121,7 +121,10 @@ end)()
 -- 写死 y 的话，改一次常量就有几十条断言同时失效（而且不报错，只是悄悄测错东西）。
 local ITEM_FALL_SPEED = tonumber(text:match("local ITEM_FALL_SPEED%s*=%s*([%d%.]+)"))
 local ITEM_SIZE = tonumber(text:match("local ITEM_SIZE%s*=%s*([%d%.]+)"))
-assert(ITEM_FALL_SPEED and ITEM_SIZE, "解析 ITEM_FALL_SPEED / ITEM_SIZE 失败")
+local ITEM_HALO = tonumber(text:match("local ITEM_HALO%s*=%s*([%d%.]+)"))
+local TICK = tonumber(text:match("local TICK%s*=%s*([%d%.]+)"))
+assert(ITEM_FALL_SPEED and ITEM_SIZE and ITEM_HALO and TICK,
+    "解析 ITEM_FALL_SPEED / ITEM_SIZE / ITEM_HALO / TICK 失败")
 
 -- ======================= 测试框架 =======================
 local pass, fail = 0, 0
@@ -1516,10 +1519,20 @@ local function itemY(eta)
 end
 
 -- 20.0 下落速度本身要够慢：道具从砖阵区底边掉到接球线，得多留几秒给玩家反应
+--
+-- 更硬的一条约束：**每帧位移必须小于刷新频率能干净擦除的量级**。
+-- 墨水屏残影是物理层的（帧缓冲是干净的，截图拍不出来），道具每帧让出的那一条
+-- 黑边如果一次让太多，物理层擦不干净 → 身后拖一条灰带。
+-- 这里把"每帧位移 ≤ 2 像素"钉死，以后有人再调快速度会立刻被断言拦下。
 local g0 = BreakoutDialog:new()
 local drop_secs = (PAD_Y - ITEM_SIZE / 2 - (g0.GRID_Y + g0.GRID_H)) / ITEM_FALL_SPEED
 check("道具下落够慢：从砖阵区底边掉到接球线 ≥ 8 秒",
     drop_secs >= 8, string.format("只有 %.1f 秒", drop_secs))
+local per_tick_px = ITEM_FALL_SPEED * TICK
+check("道具每帧位移 ≤ 2 像素（低于刷新频率能擦干净的量级）",
+    per_tick_px <= 2, string.format("每帧 %.2f 像素", per_tick_px))
+check("道具白边宽度 ≥ 每帧位移（白边包住让出的那一条）",
+    ITEM_HALO >= per_tick_px, string.format("白边 %d < 每帧 %.2f", ITEM_HALO, per_tick_px))
 
 -- 20.1 顺路：两区间相交 + 两者差不多同时到线 -> 目标取交集中心
 -- 用例要避开"白捡"：道具区间不能包含球落点 300，否则命中的是白捡档。
