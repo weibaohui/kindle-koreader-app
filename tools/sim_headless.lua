@@ -185,7 +185,12 @@ p.paddle_w = 96
 item.y = p.PADDLE_Y - 20
 item.checked = false
 local items_before = #p.items
-p:updateItems()
+-- 道具下落速度是可调参数，落几帧到接球线取决于速度，
+-- 所以这里循环推进直到接住/掉出，测试不跟具体速度耦合。
+for _ = 1, 20 do
+    p:updateItems()
+    if #p.items < items_before then break end
+end
 check("道具落到挡板处被接住", #p.items < items_before, "#items=" .. #p.items)
 check("接住道具产生提示", p.toast ~= nil)
 
@@ -491,7 +496,7 @@ end
 check("下坠时球底不超过底线", worst_ball <= death_y,
     "最大球底 " .. worst_ball .. " > 底线 " .. death_y)
 
--- (2) 道具下坠同理（道具每 tick 固定落 10px，扫起始高度覆盖所有相位）
+-- (2) 道具下坠同理（道具每 tick 固定落 5px，扫起始高度覆盖所有相位）
 local worst_item = 0
 for y0 = 100, 110 do
     local itd = BreakoutDialog:new()

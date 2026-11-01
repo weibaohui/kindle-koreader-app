@@ -50,7 +50,7 @@ local MAX_BALLS = 4               -- 多球道具的球数上限
 
 -- ======================= 掉落道具 =======================
 local ITEM_SIZE = 28              -- 道具徽章边长
-local ITEM_FALL_SPEED = 100       -- 道具下落速度 (px/s)，慢速以控制残影
+local ITEM_FALL_SPEED = 50        -- 道具下落速度 (px/s)：再慢一倍，太快接不到
 local ITEM_MAX_COUNT = 4          -- 同屏最多掉落道具数 (道具砖变多后要留得住)
 local ITEM_MARK_MAX = 3           -- 最多同时显示几个道具落点标记
 
