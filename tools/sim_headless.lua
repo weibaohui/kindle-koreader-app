@@ -1379,6 +1379,106 @@ sg:tick()
 check("护盾到期后不再标护盾脏区", called == 0, "调用 " .. called .. " 次")
 
 end
+-- ======================= 场景 19: AI 辅助 =======================
+-- AI = 挡板自动跟住最迫近那颗球的预测落点（marker_x 就是那个落点，
+-- 也正是屏幕上画的十字预测标记，两边永远一致）。
+-- 玩家手动拖动时 AI 让位，停手后自动接回来 —— 它是"辅助"，不抢挡板。
+section("场景 19: AI 辅助")
+do
+
+-- 19.1 默认关闭
+local g0 = BreakoutDialog:new()
+check("AI 默认关闭", g0.ai_mode == false, "ai_mode=" .. tostring(g0.ai_mode))
+check("顶栏注册了 AI 按钮", text:find('action = "ai"') ~= nil)
+
+-- 19.2 按钮可切换
+g0:doButton("ai")
+check("doButton 切到 AI 开", g0.ai_mode == true, "ai_mode=" .. tostring(g0.ai_mode))
+g0:doButton("ai")
+check("doButton 切回 AI 关", g0.ai_mode == false, "ai_mode=" .. tostring(g0.ai_mode))
+
+-- 19.3 AI 关着时挡板纹丝不动
+local g1 = BreakoutDialog:new()
+g1:launchBall()
+local x_before = g1.paddle_x
+for _ = 1, 200 do g1:tick() end
+check("AI 关闭时挡板不动", math.abs(g1.paddle_x - x_before) < 0.01,
+    "dx=" .. tostring(g1.paddle_x - x_before))
+
+-- 19.4 AI 开着时挡板自己动，且朝落点靠
+local g2 = BreakoutDialog:new()
+g2.ai_mode = true
+g2:launchBall()
+for _ = 1, 10 do g2:tick() end
+check("AI 开启后有落点标记", g2.marker_x ~= nil)
+local moved = false
+for _ = 1, 200 do
+    local before = g2.paddle_x
+    g2:tick()
+    if math.abs(g2.paddle_x - before) > 0.01 then moved = true end
+end
+check("AI 开启后挡板自动移动", moved)
+-- AI 的目标由 aiTarget() 给出（出砖阵区走精确外推，在砖阵区走快照预测），
+-- 所以断言对着 aiTarget()，不要绑死到 marker_x。
+local gap = math.abs(g2.paddle_x - (g2:aiTarget() or g2.paddle_x))
+check("AI 挡板跟着落点走", gap < 60, "离落点 " .. string.format("%.1f", gap) .. "px")
+
+-- 19.5 玩家手动拖动时 AI 让位
+local g3 = BreakoutDialog:new()
+g3.ai_mode = true
+g3:launchBall()
+for _ = 1, 10 do g3:tick() end
+g3:onPan(nil, { relative = { x = 0, y = 0 }, start_pos = { x = 300, y = 400 } })
+g3.paddle_target_x = 120
+g3:tick()
+check("玩家拖动时 AI 不抢挡板", g3.paddle_target_x == 120,
+    "target=" .. tostring(g3.paddle_target_x))
+
+-- 19.6 让位期过后 AI 重新接管
+g3.ai_pause_until = 0
+for _ = 1, 5 do g3:tick() end
+check("让位期过后 AI 重新接管",
+    g3.ai_target_x ~= nil and math.abs(g3.paddle_target_x - g3.ai_target_x) < 0.01,
+    "target=" .. tostring(g3.paddle_target_x) .. " aiTarget=" .. tostring(g3.ai_target_x))
+
+-- 19.7 AI 挂机时不会把球漏掉（最强的一条：整局不扣命）
+-- 压力测试：AI 全程接管挡板，玩家只负责发球。
+-- 必须像场景 1 那样"待发球就发球"，否则球漏一次后就静止不动，
+-- AI 根本不会被持续压测（踩过一次：漏球统计只有 1，看起来像"只漏一颗"）。
+local g4 = BreakoutDialog:new()
+g4.ai_mode = true
+local _serves, _lost, _nilm = 0, 0, 0
+local _prev_lives = 3
+for _ = 1, 3000 do
+    if g4.state == 0 then
+        g4:launchBall()
+        _serves = _serves + 1
+    end
+    g4:tick()
+    if g4.marker_x == nil then _nilm = _nilm + 1 end
+    if g4.lives < _prev_lives then
+        _lost = _lost + 1
+        _prev_lives = g4.lives
+    end
+end
+print(string.format("   [诊断] 发球 %d 次, 漏球 %d 次, marker_x 为 nil 的帧数 = %d / 3000",
+    _serves, _lost, _nilm))
+-- 注意：不能只看 lives —— 漏球后如果捡到"加命"道具会把命补回来，
+-- 漏球次数会被掩盖。这里直接数漏球次数。
+check("AI 模式 3000 帧零漏球", _lost == 0,
+    "漏球=" .. tostring(_lost) .. " lives=" .. tostring(g4.lives)
+    .. " score=" .. tostring(g4.score) .. " 发球=" .. tostring(_serves))
+check("AI 模式能持续得分", g4.score > 0, "score=" .. tostring(g4.score))
+
+-- 19.8 AI 挂着不影响发球（辅助只管接，不管开球）
+local g5 = BreakoutDialog:new()
+g5.ai_mode = true
+check("AI 开启时仍是待发球状态", g5.state == 0, "state=" .. tostring(g5.state))
+g5:launchBall()
+check("AI 开启仍可正常发球", g5.state == 1, "state=" .. tostring(g5.state))
+
+end
+
 -- ======================= 结果 =======================
 print(string.format("\n========== 结果: %d 通过, %d 失败 ==========", pass, fail))
 os.exit(fail == 0 and 0 or 1)

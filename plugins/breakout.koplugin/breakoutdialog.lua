@@ -211,11 +211,17 @@ local POWER_BRICK_MIN = 6
 local POWER_BRICK_MAX = 10
 
 -- 顶栏按钮：靠左排布，避开右上角系统状态栏(时钟/电量)的覆盖区域
+-- 最左边是 AI 辅助开关：开启时按钮反白（黑底白字），
+-- 墨水屏上明暗反转是最强的状态区分，比灰阶可靠。
 local BTN_DEF = {
+    { x = 220, w = 62, action = "ai" },
     { x = 286, w = 62, action = "pause" },
     { x = 352, w = 62, action = "restart" },
     { x = 418, w = 62, action = "exit" },
 }
+
+-- 玩家手动拖动挡板后，AI 让位多久（秒）再自动接管
+local AI_MANUAL_HOLD = 1.2
 
 
 local BreakoutDialog = InputContainer:extend{
@@ -285,6 +291,13 @@ function BreakoutDialog:init()
     self.pan_anchor = nil
     self.pan_start_x = nil
     self.pan_start_y = nil
+
+    -- AI 辅助：开启后挡板自动跟住球的预测落点。
+    -- ai_pause_until 是"玩家手动接管到什么时候"（fts 时间戳）：
+    -- 玩家一拖动挡板，AI 就让位；玩家停手后 AI 再接回来。
+    self.ai_mode = false
+    self.ai_pause_until = 0
+    self.ai_target_x = nil
 
     self.marker_x = nil
 
@@ -530,6 +543,8 @@ function BreakoutDialog:startNewGame(full)
     self.state_before_pause = nil
     self.state_countdown = 0
     self.marker_x = nil
+    -- 重开一局不改变 AI 开关（那是玩家的偏好），但让 AI 立刻重新接管
+    self.ai_pause_until = 0
     self:resetBallToPaddle()
     self:refreshAll()
     -- 重新开局做一次全刷，清掉上一局残留在砖阵区的灰影
@@ -1109,17 +1124,25 @@ function BreakoutDialog:stepBalls(dt)
     end
 end
 
--- 预测球落到挡板高度时的横坐标 (供"落点标记"使用)
+-- 预测球落到挡板高度时的横坐标 (供"落点标记"与 AI 辅助使用)
+--
+-- 这里曾经有一个让落点预测"几乎永远算不准"的坑，已修掉：
+-- 步长单位。vx/vy 是 px/s，步长必须也是"秒"，不能拿像素当步长。
+-- 原来写成 step=6 像素，等于球每步走 6 秒的距离，一步就越过整个场地，
+-- 结果永远撞在左右边界上、立刻返回边界坐标 —— 屏幕上的落点十字
+-- 基本停在场地边上，AI 也就无从跟起。
+--
+-- 现在 dt=0.05s（每步 7~10px，比砖高 24px 细），最多 600 步 = 30 秒路径。
 function BreakoutDialog:predictLanding(src)
     local b = src or self.balls[1]
     if not b then return nil end
     local rad = b.r or BALL_R
     local x, y, vx, vy = b.x, b.y, b.vx, b.vy
-    local step = 6
+    local dt = 0.05
     local bounces = 0
-    for _ = 1, 1200 do
-        x = x + vx * step
-        y = y + vy * step
+    for _ = 1, 600 do
+        x = x + vx * dt
+        y = y + vy * dt
 
         local left = self.FIELD_X + rad
         local right = self.FIELD_X + self.FIELD_W - rad
@@ -1137,7 +1160,7 @@ function BreakoutDialog:predictLanding(src)
             local r, c, bx, by = self:brickAt(x, y, rad)
             if r then
                 bounces = bounces + 1
-                if bounces > 3 then return nil end
+                if bounces > 30 then return nil end
                 local dl = x - rad - bx
                 local dr = bx + BRICK_W - (x + rad)
                 local dt = y - rad - by
@@ -1211,6 +1234,76 @@ function BreakoutDialog:updatePrediction()
     if px then
         self.marker_x = self:clampPaddle(px)
     end
+end
+
+-- 球已经掉出砖阵区时的落点外推：路径只剩左右墙反射，可以精确解析求解。
+-- 用"对折"法处理任意次墙面反射：把展开路径按场地宽度对折回区间内。
+function BreakoutDialog:extrapolateLanding(b)
+    local rad = b.r or BALL_R
+    if not b or b.vy <= 0 then return nil end
+    local t = (self.PADDLE_Y - rad - b.y) / b.vy
+    if t < 0 then return nil end
+    local left = self.FIELD_X + rad
+    local right = self.FIELD_X + self.FIELD_W - rad
+    local w = right - left
+    if w <= 0 then return nil end
+    local rel = (b.x + b.vx * t) - left
+    rel = rel % (2 * w)
+    if rel > w then rel = 2 * w - rel end
+    return left + rel
+end
+
+-- AI 目标：挡板该去的横坐标（没有目标时返回 nil）
+--
+-- 落点来源分两种：
+--  · 球还在砖阵区里 -> 用 updatePrediction 的 marker_x（含砖块反弹）。
+--    但那是"砖块快照"预测：球飞行途中会打碎砖，路径随之改变，
+--    所以预测值会漂，只能作大方向参考。
+--  · 球已经掉出砖阵区 -> 路径只剩左右墙反射，用 extrapolateLanding 精确外推，
+--    这时候算出来的落点才是准的。
+function BreakoutDialog:aiTarget()
+    if self.state ~= STATE_PLAYING then return nil end
+    -- 球被吸盘吸在挡板上时，挡板本来就该待在原地
+    if self.caught_ball then return nil end
+
+    -- 最迫近的那颗球（y 最大）
+    local best, besty = nil, nil
+    for _, b in ipairs(self.balls) do
+        if not b.caught and (besty == nil or b.y > besty) then
+            best, besty = b, b.y
+        end
+    end
+    if not best then return nil end
+
+    local rad = best.r or BALL_R
+    local target = nil
+    if best.y > self.GRID_Y + self.GRID_H + rad then
+        -- 已出砖阵区：精确外推
+        target = self:extrapolateLanding(best)
+    else
+        -- 还在砖阵区：用快照预测
+        target = self.marker_x
+    end
+    if not target then
+        -- 兜底：预测失败时退化成"跟着球走"，
+        -- 至少保证挡板在球的正下方，不会完全漏接。
+        target = best.x
+    end
+    return self:clampPaddle(target)
+end
+
+-- 玩家优先：一旦手动拖动挡板，AI 在 ai_pause_until 之前完全不插手；
+-- 玩家停手一会儿后 AI 再接回来。所以它是"辅助"，不会和玩家抢挡板。
+--
+-- 不自动发球：发球是玩家的动作，AI 只负责"接"。
+function BreakoutDialog:updateAI()
+    if not self.ai_mode then return end
+    if Time.now() < (self.ai_pause_until or 0) then return end
+    local t = self:aiTarget()
+    -- 缓存本次用的目标：落点每 tick 都在变，缓存下来才能对得上
+    -- "挡板当前是被 AI 摆到哪"这个问题（否则断言会差一个 tick 的量）。
+    self.ai_target_x = t
+    if t then self.paddle_target_x = t end
 end
 
 -- ======================= 主循环与刷新 =======================
@@ -1397,7 +1490,13 @@ function BreakoutDialog:doRefresh()
         self._dr.brick = nil
     end
 
-    -- 5) 砖阵区低频维护刷新：清理 e-ink 残影。
+    -- 5) 顶栏脏区：AI 开关切换时只刷按钮那一小块，不整屏重刷
+    if self._dr.topbar then
+        self:pushRect(self._dr.topbar, 1)
+        self._dr.topbar = nil
+    end
+
+    -- 6) 砖阵区低频维护刷新：清理 e-ink 残影。
     -- 只在游戏中做，而且要很稀疏 —— 这一刷是 555x167 的大区域，
     -- 0.5s 一次的话既费电又刷得满屏闪。
     if self.state == STATE_PLAYING then
@@ -1434,6 +1533,9 @@ function BreakoutDialog:tick()
     -- 暂停时全场冻结：挡板不缓动、球不动、标记不更新
     if self.state ~= STATE_PAUSED then
         self:updateEffects()
+        -- AI 在 updatePaddle 之前设定目标：marker_x 是上一 tick 算好的落点，
+        -- 提前一步用上，本 tick 就能开始往落点挪。
+        self:updateAI()
         self:updatePaddle()
         self:updateItems()
         self:updateBullets(TICK)
@@ -1573,10 +1675,13 @@ function BreakoutDialog:paintLine(bb, x1, y1, x2, y2, w, color)
     end
 end
 
-function BreakoutDialog:drawButton(bb, bx, by, bw, bh, label)
-    bb:paintRoundedRect(bx, by, bw, bh, Blitbuffer.COLOR_WHITE, 4)
+function BreakoutDialog:drawButton(bb, bx, by, bw, bh, label, active)
+    -- active = true 时反白（黑底白字）：墨水屏上明暗反转是最醒目的开关状态
+    local bg = active and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
+    local fg = active and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+    bb:paintRoundedRect(bx, by, bw, bh, bg, 4)
     local tw = RenderText:sizeUtf8Text(0, nil, self.font_btn, label, false, true).x
-    RenderText:renderUtf8Text(bb, bx + math.floor((bw - tw) / 2), by + 21, self.font_btn, label, false, true, Blitbuffer.COLOR_BLACK)
+    RenderText:renderUtf8Text(bb, bx + math.floor((bw - tw) / 2), by + 21, self.font_btn, label, false, true, fg)
 end
 
 function BreakoutDialog:drawOverlay(bb, cx, cy, w, h, title, sub)
@@ -1741,9 +1846,10 @@ function BreakoutDialog:paintTo(bb, x, y)
     -- ---------- 顶栏 ----------
     bb:paintRect(0, 0, W, TOPBAR_H, Blitbuffer.COLOR_BLACK)
     RenderText:renderUtf8Text(bb, 12, 31, self.font_title, "砖石战场", false, true, Blitbuffer.COLOR_WHITE)
-    self:drawButton(bb, BTN_DEF[1].x, 7, BTN_DEF[1].w, 30, self.state == STATE_PAUSED and "继续" or "暂停")
-    self:drawButton(bb, BTN_DEF[2].x, 7, BTN_DEF[2].w, 30, "重开")
-    self:drawButton(bb, BTN_DEF[3].x, 7, BTN_DEF[3].w, 30, "退出")
+    self:drawButton(bb, BTN_DEF[1].x, 7, BTN_DEF[1].w, 30, "AI", self.ai_mode)
+    self:drawButton(bb, BTN_DEF[2].x, 7, BTN_DEF[2].w, 30, self.state == STATE_PAUSED and "继续" or "暂停")
+    self:drawButton(bb, BTN_DEF[3].x, 7, BTN_DEF[3].w, 30, "重开")
+    self:drawButton(bb, BTN_DEF[4].x, 7, BTN_DEF[4].w, 30, "退出")
 
     -- ---------- 场地 ----------
     bb:paintRect(self.FIELD_X - 2, self.FIELD_Y - 2, self.FIELD_W + 4, self.FIELD_H + 4, Blitbuffer.COLOR_BLACK)
@@ -2089,6 +2195,8 @@ function BreakoutDialog:onPan(arg, ges)
         self.pan_anchor = self.paddle_x - move
     end
     self.paddle_target_x = self:clampPaddle(self.pan_anchor + move)
+    -- 玩家一动手，AI 立刻让位；玩家停手 AI_MANUAL_HOLD 秒后自动接回来
+    self.ai_pause_until = Time.now() + Time.s(AI_MANUAL_HOLD)
     -- 渲染交给主循环统一刷新，避免高频重绘打爆 e-ink
     return true
 end
@@ -2121,6 +2229,15 @@ function BreakoutDialog:doButton(action)
         self:startNewGame(true)
     elseif action == "exit" then
         self:onClose()
+    elseif action == "ai" then
+        -- AI 辅助开关：切过去时立刻让玩家接管一次（别在玩家正拖挡板时突然抢走）
+        self.ai_mode = not self.ai_mode
+        self.ai_pause_until = 0
+        if self.ai_mode then
+            self.ai_pause_until = Time.now() + Time.s(0.3)
+        end
+        -- 只刷顶栏那一小块，别整屏重刷
+        self:markRect(BTN_DEF[1].x - 2, 2, BTN_DEF[4].x + BTN_DEF[4].w + 2, TOPBAR_H, "topbar")
     end
 end
 
