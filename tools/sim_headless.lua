@@ -13,6 +13,7 @@ math.randomseed(20261031)
 
 -- ======================= Mock: Blitbuffer =======================
 local drawn = 0
+local ops = {}          -- 记录绘图指令，用于渲染层的越界/元素检查
 local Blitbuffer = {
     COLOR_BLACK = 0x00, COLOR_WHITE = 0xFF,
     COLOR_GRAY_1 = 0x11, COLOR_GRAY_2 = 0x22, COLOR_GRAY_3 = 0x33,
@@ -20,10 +21,19 @@ local Blitbuffer = {
     COLOR_GRAY_7 = 0x77, COLOR_GRAY_8 = 0x88, COLOR_GRAY_9 = 0x99,
     COLOR_GRAY_B = 0xBB, COLOR_LIGHT_GRAY = 0xCC, COLOR_GRAY_E = 0xEE,
 }
-local function noop() drawn = drawn + 1 end
-Blitbuffer.paintRect = noop
-Blitbuffer.paintCircle = noop
-Blitbuffer.paintRoundedRect = noop
+-- 注意：插件里是 bb:paintRect(...) 冒号调用，第一个参数是 self
+Blitbuffer.paintRect = function(_, x, y, w, h, color)
+    drawn = drawn + 1
+    ops[#ops + 1] = { op = "rect", x = x, y = y, w = w, h = h, c = color }
+end
+Blitbuffer.paintCircle = function(_, x, y, r, color, border)
+    drawn = drawn + 1
+    ops[#ops + 1] = { op = "circle", x = x, y = y, r = r, c = color, b = border }
+end
+Blitbuffer.paintRoundedRect = function(_, x, y, w, h, color, radius)
+    drawn = drawn + 1
+    ops[#ops + 1] = { op = "rr", x = x, y = y, w = w, h = h, c = color, r = radius }
+end
 
 -- ======================= Mock: 其它 KOReader 模块 =======================
 local FTS = 1e6 -- 模拟 fts 定点标度
@@ -938,6 +948,193 @@ print(string.format("     跑了 %d 帧, 分数=%d, 关卡=%d, 球数=%d, 子弹
 check("压力测试后状态自洽",
     st2.state == 0 or st2.state == 1 or st2.state == 3 or st2.state == 4,
     "state=" .. tostring(st2.state))
+
+-- ======================= 场景 17: 渲染层冒烟测试 =======================
+-- 墨水屏插件最怕两件事：画到屏幕外（内容看不见）、元素没画出来（效果等于没做）。
+-- 这里直接调 paintTo，检查绘图指令的边界与关键元素是否到位。
+section("场景 17: 渲染层冒烟测试")
+
+local function render(d)
+    ops = {}
+    d:paintTo(Blitbuffer, 0, 0)
+    return ops
+end
+
+-- (1) 各种道具组合下都不能有图形画到屏幕外
+local combos = {
+    {}, { "extend" }, { "multi" }, { "slow" }, { "life" }, { "catch" }, { "gold" },
+    { "pierce" }, { "bomb" }, { "laser" }, { "shield" },
+    { "shrink" }, { "fast" }, { "narrow" }, { "flip" }, { "drop" }, { "blind" }, { "chaos" },
+    { "laser", "shield", "blind", "pierce", "narrow", "extend" },   -- 叠满
+}
+local oob = nil
+local checked = 0
+for _, combo in ipairs(combos) do
+    local d = BreakoutDialog:new()
+    d:launchBall()
+    for _, id in ipairs(combo) do d:applyPowerUp(id) end
+    d:updateEffects()
+    -- 造出各类运动物体，保证渲染路径被完整走一遍
+    d.bullets = { { x = d.paddle_x, y = d.PADDLE_Y - 40, px = d.paddle_x, py = d.PADDLE_Y - 40 } }
+    d.items = { { id = "laser", x = 300, y = 200, px = 300, py = 200, checked = false } }
+    local o = render(d)
+    checked = checked + 1
+    for _, op in ipairs(o) do
+        local x1, y1, x2, y2
+        if op.op == "circle" then
+            x1, y1, x2, y2 = op.x - op.r, op.y - op.r, op.x + op.r, op.y + op.r
+        else
+            x1, y1, x2, y2 = op.x, op.y, op.x + op.w, op.y + op.h
+        end
+        if x1 < -1 or y1 < -1 or x2 > 601 or y2 > 801 then
+            oob = string.format("组合 [%s]: %s 越界 (%.0f,%.0f)-(%.0f,%.0f)",
+                table.concat(combo, "+"), op.op, x1, y1, x2, y2)
+            break
+        end
+    end
+    if oob then break end
+end
+check(string.format("各种道具组合(%d 种)下都不画到屏幕外", checked), oob == nil, tostring(oob))
+
+-- (2) 护盾：挡板上方要有一条白底护壁
+local sh = BreakoutDialog:new()
+sh:launchBall()
+sh:applyPowerUp("shield")
+sh:updateEffects()
+local sh_ops = render(sh)
+local has_shield = false
+for _, op in ipairs(sh_ops) do
+    if op.op == "rect" and op.c == 0xFF and op.w == sh.paddle_w
+        and math.abs(op.y - (sh.PADDLE_Y - 22 - 3)) <= 1 then
+        has_shield = true
+    end
+end
+check("护盾: 挡板上方画出护壁", has_shield)
+
+-- (3) 激光：挡板两侧要画出炮管
+local la = BreakoutDialog:new()
+la:launchBall()
+la:applyPowerUp("laser")
+la:updateEffects()
+local la_ops = render(la)
+local gun = 0
+for _, op in ipairs(la_ops) do
+    if op.op == "rect" and op.c == 0x00 and op.w == 4 and op.h == 11
+        and math.abs(op.y - (la.PADDLE_Y - 9)) <= 1 then
+        gun = gun + 1
+    end
+end
+check("激光: 挡板两侧画出炮管", gun == 2, "炮管 " .. gun .. " 个")
+
+-- (4) 隐形：挡板实体不该再被画成实心黑块
+local bl = BreakoutDialog:new()
+bl:launchBall()
+bl:applyPowerUp("blind")
+bl:updateEffects()
+local bl_ops = render(bl)
+local solid_paddle = false
+for _, op in ipairs(bl_ops) do
+    if op.op == "rr" and op.c == 0x00 and op.w == bl.paddle_w and op.h == 12
+        and math.abs(op.y - bl.PADDLE_Y) <= 1 then
+        solid_paddle = true
+    end
+end
+check("隐形: 挡板实体不再画实心黑块", not solid_paddle)
+
+-- 正常状态下挡板必须是实心黑块（对照，防止上面的判断写得太宽）
+local nm = BreakoutDialog:new()
+nm:launchBall()
+local nm_ops = render(nm)
+local normal_paddle = false
+for _, op in ipairs(nm_ops) do
+    if op.op == "rr" and op.c == 0x00 and op.w == nm.paddle_w and op.h == 12
+        and math.abs(op.y - nm.PADDLE_Y) <= 1 then
+        normal_paddle = true
+    end
+end
+check("对照: 正常挡板是实心黑块", normal_paddle)
+
+-- (5) 穿透：球心要有一个白色小点
+local pi = BreakoutDialog:new()
+pi:launchBall()
+pi:applyPowerUp("pierce")
+pi:updateEffects()
+local pi_ops = render(pi)
+local pb = pi.balls[1]
+local dot = false
+for _, op in ipairs(pi_ops) do
+    if op.op == "circle" and op.c == 0xFF and op.r == 4
+        and math.abs(op.x - pb.x) <= 2 and math.abs(op.y - pb.y) <= 2 then
+        dot = true
+    end
+end
+check("穿透: 球心画出白色小点", dot)
+
+-- (6) 细球：球画出来的半径要变小
+local nr = BreakoutDialog:new()
+nr:launchBall()
+nr:applyPowerUp("narrow")
+nr:updateEffects()
+local nr_ops = render(nr)
+local small_ball = false
+for _, op in ipairs(nr_ops) do
+    if op.op == "circle" and op.c == 0x00 and op.r == 4 then small_ball = true end
+end
+check("细球: 球按小半径画出来", small_ball)
+
+-- (7) 效果条最多 6 个槽 + 1 个提示，横向不能超出底栏
+local fx = BreakoutDialog:new()
+fx:launchBall()
+for _, id in ipairs({ "extend", "slow", "catch", "pierce", "bomb", "laser", "flip", "blind" }) do
+    fx:applyPowerUp(id)
+end
+fx:updateEffects()
+local fx_ops = render(fx)
+local fx_right = 0
+for _, op in ipairs(fx_ops) do
+    if op.op == "rr" and op.r == 4 and op.w == 24 and op.h == 24 and op.y == fx.H - 92 + 48 then
+        fx_right = math.max(fx_right, op.x + op.w)
+    end
+end
+check("效果条不超出底栏右边界", fx_right <= fx.W, "最右 " .. tostring(fx_right))
+
+-- ======================= 场景 18: 护盾脏区不白占刷新预算 =======================
+-- 护盾线挂在挡板上方 22px 处。如果把它无条件并进"挡板移动"的脏区，
+-- 没有护盾时也要多刷 23px 高的区域 —— 墨水屏上这块是纯浪费。
+section("场景 18: 护盾脏区预算")
+
+local sg = BreakoutDialog:new()
+sg:launchBall()
+sg.state = 1                 -- PLAYING，让挡板跟手移动
+sg:tick()                    -- 预热：底栏首帧推一次，之后进入稳态
+
+-- 直接数 markShieldDirty 的调用次数，避开"落点十字"脏区的干扰
+-- （十字画在 PADDLE_Y-16，±10 -> 636..656，本来就盖住护盾带）
+local called = 0
+local orig_shield_dirty = sg.markShieldDirty
+sg.markShieldDirty = function(self, ox, ow)
+    called = called + 1
+    return orig_shield_dirty(self, ox, ow)
+end
+
+sg.paddle_target_x = sg.paddle_x + 60
+sg:tick()
+check("无护盾时不标护盾脏区", called == 0, "调用 " .. called .. " 次")
+
+sg:applyPowerUp("shield")
+sg:updateEffects()
+called = 0
+sg.paddle_target_x = sg.paddle_x + 60
+sg:tick()
+check("有护盾时标护盾脏区", called == 1, "调用 " .. called .. " 次")
+
+-- 护盾到期后同样不再标脏区
+sg.tick_count = sg.effects.shield + 1
+sg:updateEffects()
+called = 0
+sg.paddle_target_x = sg.paddle_x + 60
+sg:tick()
+check("护盾到期后不再标护盾脏区", called == 0, "调用 " .. called .. " 次")
 
 -- ======================= 结果 =======================
 print(string.format("\n========== 结果: %d 通过, %d 失败 ==========", pass, fail))

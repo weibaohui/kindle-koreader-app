@@ -1175,15 +1175,26 @@ function BreakoutDialog:paddleLook()
     return look
 end
 
--- 标脏整块挡板区域（含护盾线）。
--- 护盾线挂在挡板上方 SHIELD_GAP 处，护盾出现/消失时要单独擦掉。
+-- 标脏整块挡板区域
 function BreakoutDialog:markPaddleDirty(ox, ow)
     local ph = self.paddle_w / 2 + 3
     local pho = (ow or self.paddle_w) / 2 + 3
     self:markRect(ox - pho, self.PADDLE_Y - 3, ox + pho, self.PADDLE_Y + PADDLE_H + 3)
     self:markRect(self.paddle_x - ph, self.PADDLE_Y - 3, self.paddle_x + ph, self.PADDLE_Y + PADDLE_H + 3)
-    self:markRect(self.paddle_x - ph, self.PADDLE_Y - SHIELD_GAP - 4,
-                  self.paddle_x + ph, self.PADDLE_Y - SHIELD_GAP + 4)
+end
+
+-- 标脏护盾线区域。护盾线挂在挡板上方 SHIELD_GAP 处，会跟着挡板走，
+-- 所以挡板移动时也要把旧位置擦掉。
+-- 单独拆出来是为了不把它并进挡板移动脏区 —— 没有护盾时白白多刷 23px 高的区域，
+-- 墨水屏上这块是纯浪费。
+function BreakoutDialog:markShieldDirty(ox, ow)
+    local x1 = ox or self.paddle_x
+    local w1 = ow or self.paddle_w
+    local ph = self.paddle_w / 2 + 3
+    local pho = w1 / 2 + 3
+    local sy = self.PADDLE_Y - SHIELD_GAP
+    self:markRect(x1 - pho, sy - 4, x1 + pho, sy + 4)
+    self:markRect(self.paddle_x - ph, sy - 4, self.paddle_x + ph, sy + 4)
 end
 
 -- 底栏的 5 个数据格：分数/最高/生命/关卡/速度
@@ -1369,8 +1380,13 @@ function BreakoutDialog:tick()
         end
     end
     -- 挡板：位置、宽度或外观变了才标脏（缓动是浮点微移，dx=0 时完全不动）
-    if self.paddle_x ~= opx or self.paddle_w ~= opw or olook ~= self:paddleLook() then
+    local look_changed = olook ~= self:paddleLook()
+    if self.paddle_x ~= opx or self.paddle_w ~= opw or look_changed then
         self:markPaddleDirty(opx, opw)
+    end
+    -- 护盾线单独处理：只在护盾存在或刚刚消失时才占刷新预算
+    if olook:find("S") or self.effects.shield then
+        self:markShieldDirty(opx, opw)
     end
     -- 球的落点标记：位置变了才标脏
     if omx ~= self.marker_x then
