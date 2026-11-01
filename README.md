@@ -151,6 +151,7 @@ kindle-koreader-app/
 │   ├── BREAKOUT_PLAN.md        # 打砖块游戏设计方案（调研 + 设计 + 实施路线）
 │   ├── TETRIS_ACCEL.md         # 方块战争「长按加速下滑」设计与真机验证（含两个 KOReader 引擎级坑的复盘）
 │   ├── SUDOKU.md               # 数独设计方案（出题算法 / 形状化视觉 / 真机验证 / 触控注入坑 / 设备"假掉线"排查）
+│   ├── KINDLE_API.md           # 📡 Kindle 后台 HTTP 控制接口：架构 / API 规格 / 五个必踩的坑 / 安全与功耗
 │   └── screenshots/           # 实机运行效果截图
 ├── plugins/
 │   ├── tetris.koplugin/       # 俄罗斯方块 KOReader 插件
@@ -179,6 +180,13 @@ kindle-koreader-app/
             ├── run.sh         # KUAL 启动入口
             └── config_key.sh  # 屏幕提示引导脚本
 ├── tools/
+│   ├── krapi/                   # 📡 Kindle 后台 HTTP 控制接口（让 AI 通过 HTTP 直接操作这台设备）
+│   │   ├── server.lua           #   独立 luajit + LuaSocket 的 HTTP 服务（ping/status/screenshot/tap/hold/swipe）
+│   │   ├── start.sh             #   设备端启动（iptables 放行 + 禁用自动挂起 + keep_awake + 起服务）
+│   │   ├── stop.sh              #   设备端停止与完全回滚
+│   │   ├── emergency.sh         #   开机 root 钩子（装到 /mnt/us/emergency.sh，越狱官方注册项）
+│   │   ├── install.sh           #   Mac 端一键部署 + 验证
+│   │   └── krapi.sh             #   Mac 端命令行客户端
 │   ├── kindle_screenshot.sh   # 零残留真机截图脚本
 │   ├── kindle_tap.sh          # 设备端触控点击注入（⚠️ zforce2 机型无效，见下方说明）
 │   ├── touch_drag.lua         # 设备端触控拖拽注入
@@ -247,6 +255,47 @@ G_reader_settings:flush()
 - **重启 KOReader 必须用前台模式** `./koreader.sh`（**不带 `--kual`**）。
   带 `--kual` 会在后台跑，屏幕上根本不显示 KOReader，截图拍到的是 Kindle 原生桌面。
   冷启动约 50 秒才加载完插件。
+
+---
+
+## 📡 后台 HTTP 控制接口（krapi）—— 让 AI 直接操作这台 Kindle
+
+> 设计文档：[`docs/KINDLE_API.md`](docs/KINDLE_API.md)
+> 设备上跑一个**常驻 HTTP 服务**，AI 通过普通 HTTP 调用就能点按、长按、滑动、截屏这台墨水屏设备。
+
+```bash
+# 一键部署（会装好服务、生成令牌、挂上开机自启）
+./tools/krapi/install.sh 192.168.0.99 8099
+
+# 用起来
+./tools/krapi/krapi.sh status              # 电量 / 内存 / 负载 / KOReader 是否在线
+./tools/krapi/krapi.sh shot /tmp/s.png     # 截当前屏幕（设备端零残留）
+./tools/krapi/krapi.sh tap 248 80          # 点一下
+./tools/krapi/krapi.sh hold 248 80 1500    # 长按
+```
+
+裸 HTTP：
+
+```bash
+TOKEN=$(ssh -p 2222 root@192.168.0.99 cat /mnt/us/krapi/token)
+curl -H "X-Api-Token: $TOKEN" http://192.168.0.99:8099/status
+curl -H "X-Api-Token: $TOKEN" http://192.168.0.99:8099/screenshot.png -o /tmp/s.png
+curl -H "X-Api-Token: $TOKEN" "http://192.168.0.99:8099/tap?x=248&y=80"
+```
+
+**这条路上埋了五个坑，全是实测踩出来的**（细节见设计文档）：
+
+1. **Kindle 的 iptables INPUT 策略是 `DROP`** —— 自己 bind 的端口从局域网**连不上**，
+   必须 `iptables -I INPUT 1 -p tcp --dport <port> -j ACCEPT`（和越狱放行 SSH 同一手法）；
+2. **KOReader 空闲 15 分钟自动挂起**，WiFi 跟着断 → 设备从网络消失，必须把
+   `auto_suspend_timeout_seconds` 设成 `-1`；
+3. **Kindle 原生电源管理照样会让设备深度睡眠**，要用越狱自带的 `/etc/rc.d/keep_awake`；
+4. **触控注入在 zforce2 上不能走 evdev**，得让 KOReader 里的插件代劳；
+5. 设备的 `/usr/bin/lua` 是 PUC Lua 5.1，**装不了 LuaSocket**（`luaL_setfuncs` 符号缺失），
+   要用 KOReader 自带的 `/mnt/us/koreader/luajit`。
+
+> ⚠️ **安全**：服务监听 `0.0.0.0`，只跑在可信局域网里；令牌是唯一防线。
+> 刻意**没有**开放任意命令执行接口。
 
 ---
 
