@@ -114,6 +114,58 @@ local function status()
     log("stack: " .. table.concat(names, " | "))
 end
 
+-- 转储 KOReader 主菜单里的条目，用来确认插件的菜单项真的注册上了
+local function dump_menu()
+    local out = {}
+    local function add(s) out[#out + 1] = s end
+    local ok, err = pcall(function()
+        -- FileManagerMenu 的菜单表在实例里，工具菜单挂在 tools / more_tools 下
+        local found = {}
+        local stack = UIManager._window_stack or {}
+        for _, w in ipairs(stack) do
+            local widget = w.widget or w
+            local mt = widget.menu_items
+            if mt and type(mt) == "table" then
+                for k, v in pairs(mt) do
+                    if type(k) == "string" then
+                        local txt = ""
+                        if type(v) == "table" and type(v.text) == "string" then txt = v.text end
+                        found[k] = txt
+                    end
+                end
+            end
+        end
+        -- 再从 reader/filemanager 的菜单顺序表里取一遍（插件把自己的 key 插进去了）
+        local ok2, fom = pcall(require, "ui/elements/filemanager_menu_order")
+        if ok2 and fom and fom.tools then
+            for _, key in ipairs(fom.tools) do
+                found["__tools_order__" .. key] = ""
+            end
+        end
+        local ok3, rom = pcall(require, "ui/elements/reader_menu_order")
+        if ok3 and rom and rom.tools then
+            for _, key in ipairs(rom.tools) do
+                found["__reader_tools_order__" .. key] = ""
+            end
+        end
+        local keys = {}
+        for k in pairs(found) do keys[#keys + 1] = k end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            add(k .. (found[k] ~= "" and ("  |  " .. found[k]) or ""))
+        end
+    end)
+    if not ok then
+        add("ERR " .. tostring(err))
+    end
+    local f = io.open("/tmp/kr_menu_dump.txt", "w")
+    if f then
+        f:write(table.concat(out, "\n"))
+        f:close()
+    end
+    log("menu dumped: " .. #out .. " entries")
+end
+
 local function handle(line)
     local t = {}
     -- LuaJIT 5.1: string.gmatch 返回迭代函数，不能塞进 ipairs
@@ -126,6 +178,8 @@ local function handle(line)
             close_game()
         elseif cmd == "status" then
             status()
+        elseif cmd == "dumpmenu" then
+            dump_menu()
         else
             log("unknown cmd: " .. line)
         end
